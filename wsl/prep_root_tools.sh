@@ -7,28 +7,39 @@
 #  3. Extract OS / SystemOS / AppOS from the IPSW to /opt/work/ipsw (unzip checks CRCs).
 # Clones use a mirror per command only (never a global url.insteadOf).
 set -euo pipefail
-MIRROR=${MIRROR-https://gh-proxy.com/https://github.com/}   # ghfast.top 已 502；设 MIRROR= 直连 GitHub
+MIRROR=${MIRROR-https://gh-proxy.com/https://github.com/}   # ghfast.top 已 502
+PROXY=${PROXY-}
+if [ -n "$PROXY" ]; then
+	export http_proxy=$PROXY https_proxy=$PROXY HTTP_PROXY=$PROXY HTTPS_PROXY=$PROXY
+fi
 IPSW=${IPSW:-/mnt/d/workbuddy/ios/ref/ipsw/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw}
 W=/opt/work
 log() { echo "== $(date +%T) $*"; }
 
 log apt
 DEBIAN_FRONTEND=noninteractive apt-get install -y -q libelf-dev dwarves cpio bc flex bison \
+	libncurses-dev libssl-dev zstd \
 	libfuse3-dev fuse3 zlib1g-dev libbz2-dev libattr1-dev cmake g++ git >/dev/null
 
 KVER=$(uname -r)                       # 6.6.87.2-microsoft-standard-WSL2
 TAG=linux-msft-wsl-${KVER%%-microsoft*}
 if [ ! -f $W/wslk/fs/hfsplus/hfsplus.ko ]; then
-	log "kernel $TAG"
+	log "kernel $TAG  (a full kernel build: 10-30 min, watch $W/wslk-build.log)"
 	[ -d $W/wslk ] || git -c url.$MIRROR.insteadOf=https://github.com/ clone -q --depth 1 -b $TAG \
 		https://github.com/microsoft/WSL2-Linux-Kernel $W/wslk
 	cd $W/wslk
-	zcat /proc/config.gz > .config
+	if [ -r /proc/config.gz ]; then
+		zcat /proc/config.gz > .config
+	else
+		log "WARNING: /proc/config.gz missing, trying /boot/config-$KVER"
+		cp "/boot/config-$KVER" .config 2>/dev/null || {
+			echo "no kernel config available: the module's vermagic will not match" >&2; exit 1; }
+	fi
 	scripts/config --module HFSPLUS_FS --disable LOCALVERSION_AUTO
 	make -s olddefconfig
 	make -s -j"$(nproc)" LOCALVERSION= >$W/wslk-build.log 2>&1 || { tail -30 $W/wslk-build.log; exit 1; }
 fi
-modinfo -F vermagic $W/wslk/fs/hfsplus/hfsplus.ko
+log "module built: $(modinfo -F vermagic $W/wslk/fs/hfsplus/hfsplus.ko)"
 grep -qw hfsplus /proc/filesystems || insmod $W/wslk/fs/hfsplus/hfsplus.ko
 grep -w hfsplus /proc/filesystems
 
