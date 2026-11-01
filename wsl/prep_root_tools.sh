@@ -7,7 +7,7 @@
 #  3. Extract OS / SystemOS / AppOS from the IPSW to /opt/work/ipsw (unzip checks CRCs).
 # Clones use a mirror per command only (never a global url.insteadOf).
 set -euo pipefail
-MIRROR=${MIRROR-https://ghfast.top/https://github.com/}   # set MIRROR= to clone from GitHub directly
+MIRROR=${MIRROR-https://gh-proxy.com/https://github.com/}   # ghfast.top 已 502；设 MIRROR= 直连 GitHub
 IPSW=${IPSW:-/mnt/d/workbuddy/ios/ref/ipsw/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw}
 W=/opt/work
 log() { echo "== $(date +%T) $*"; }
