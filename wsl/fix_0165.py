@@ -1,5 +1,5 @@
 import os
-W = '/mnt/d/DeepSeekHarness/claude/ios_pandora/wsl/'
+W = '/mnt/d/workbuddy/ios/data-a-live-main/wsl/'
 KIT = ['ArmSmmu4K', 'ArmSmmu4KContext', 'ArmSmmu4KProgram', 'ArmSmmu4KStreams', 'ArmSmmu4KMmio']
 
 

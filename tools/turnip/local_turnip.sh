@@ -3,7 +3,7 @@
 # rebuilds only what changes; then tools/turnip/build_ios_linux.sh into /opt/work/lturnip/out.
 set -euo pipefail
 . "$HOME/.cargo/env"
-REPO=/mnt/d/DeepSeekHarness/claude/ios_pandora
+REPO=/mnt/d/workbuddy/ios/data-a-live-main
 U=/mnt/d/DeepSeekHarness/claude/unixnu_review/src
 USHA=1a01c2afa197d975d04da892325c56b6b14aaecb
 W=/opt/work/lturnip; mkdir -p $W/abi
@@ -19,31 +19,31 @@ if [ ! -f $W/mesa/.pandora-patched ]; then
 fi
 # Our own edits after UniXNU's, as turnip.yml applies them (each once per tree).
 if [ ! -f $W/mesa/.pandora-rpstats ]; then
-	python3 /mnt/d/DeepSeekHarness/claude/ios_pandora/tools/turnip/pandora_rpstats.py $W/mesa
+	python3 /mnt/d/workbuddy/ios/data-a-live-main/tools/turnip/pandora_rpstats.py $W/mesa
 	touch $W/mesa/.pandora-rpstats
 fi
 if [ ! -f $W/mesa/.pandora-wait ]; then
-	python3 /mnt/d/DeepSeekHarness/claude/ios_pandora/tools/turnip/pandora_wait.py $W/mesa
+	python3 /mnt/d/workbuddy/ios/data-a-live-main/tools/turnip/pandora_wait.py $W/mesa
 	touch $W/mesa/.pandora-wait
 fi
 if [ ! -f $W/mesa/.pandora-dsb ]; then
-	python3 /mnt/d/DeepSeekHarness/claude/ios_pandora/tools/turnip/pandora_dsb.py $W/mesa
+	python3 /mnt/d/workbuddy/ios/data-a-live-main/tools/turnip/pandora_dsb.py $W/mesa
 	touch $W/mesa/.pandora-dsb
 fi
 if [ ! -f $W/mesa/.pandora-bocheck ]; then
-	python3 /mnt/d/DeepSeekHarness/claude/ios_pandora/tools/turnip/pandora_bocheck.py $W/mesa
+	python3 /mnt/d/workbuddy/ios/data-a-live-main/tools/turnip/pandora_bocheck.py $W/mesa
 	touch $W/mesa/.pandora-bocheck
 fi
 if [ ! -f $W/mesa/.pandora-bocheck-submit ]; then
-	python3 /mnt/d/DeepSeekHarness/claude/ios_pandora/tools/turnip/pandora_bocheck_submit.py $W/mesa
+	python3 /mnt/d/workbuddy/ios/data-a-live-main/tools/turnip/pandora_bocheck_submit.py $W/mesa
 	touch $W/mesa/.pandora-bocheck-submit
 fi
 if [ ! -f $W/mesa/.pandora-bocheck-finish ]; then
-	python3 /mnt/d/DeepSeekHarness/claude/ios_pandora/tools/turnip/pandora_bocheck_finish.py $W/mesa
+	python3 /mnt/d/workbuddy/ios/data-a-live-main/tools/turnip/pandora_bocheck_finish.py $W/mesa
 	touch $W/mesa/.pandora-bocheck-finish
 fi
 if [ ! -f $W/mesa/.pandora-bo-finish-order ]; then
-	python3 /mnt/d/DeepSeekHarness/claude/ios_pandora/tools/turnip/pandora_bo_finish_order.py $W/mesa
+	python3 /mnt/d/workbuddy/ios/data-a-live-main/tools/turnip/pandora_bo_finish_order.py $W/mesa
 	touch $W/mesa/.pandora-bo-finish-order
 fi
 echo "mesa $(git -C $W/mesa rev-parse --short HEAD), $(git -C $W/mesa status --short | wc -l) files changed by the patches"

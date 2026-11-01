@@ -1,4 +1,4 @@
-W = '/mnt/d/DeepSeekHarness/claude/ios_pandora/wsl/'
+W = '/mnt/d/workbuddy/ios/data-a-live-main/wsl/'
 
 # The user client answers GetStatus (method 8) with zero fault and suspend counts
 # (iokit/Kernel/arm/PandoraAdrenoGpu.cpp).

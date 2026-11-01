@@ -2,7 +2,7 @@
 # Re-base UniXNU's native-4k-bootstrap-capacity onto the ios-fuxi start.s.
 set -euo pipefail
 cd /opt/work/tree
-P=/mnt/d/DeepSeekHarness/claude/ios_pandora/xnu/patches/0103-unixnu-native-4k-bootstrap-capacity.patch
+P=/mnt/d/workbuddy/ios/data-a-live-main/xnu/patches/0103-unixnu-native-4k-bootstrap-capacity.patch
 sed -n 680,710p osfmk/arm64/start.s
 # pmap.h and genassym.c apply unchanged
 git apply --include=osfmk/arm/pmap/pmap.h --include=osfmk/arm64/genassym.c $P

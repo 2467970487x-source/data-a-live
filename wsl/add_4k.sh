@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 U=/mnt/d/DeepSeekHarness/claude/unixnu_review/src/patches/xnu
-P=/mnt/d/DeepSeekHarness/claude/ios_pandora/xnu/patches
+P=/mnt/d/workbuddy/ios/data-a-live-main/xnu/patches
 cp /opt/work/0102-pandora-machine-config-4k.patch $P/
 n=103
 for name in native-4k-bootstrap-capacity native-4k-user-abi native-4k-signature-hash-cache; do

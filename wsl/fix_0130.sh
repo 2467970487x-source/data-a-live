@@ -5,7 +5,7 @@
 set -euo pipefail
 cd /opt/work/tree
 git diff --quiet || { echo "tree dirty"; exit 1; }
-W=/mnt/d/DeepSeekHarness/claude/ios_pandora/wsl
+W=/mnt/d/workbuddy/ios/data-a-live-main/wsl
 tr -d '\r' < $W/pandora_touch.c > bsd/dev/pandora_touch.c
 python3 - <<'PY'
 def patch(p, subs):

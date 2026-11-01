@@ -2,7 +2,7 @@
 # qemu_phone.sh OUTDIR SECS [KERNEL_FOR_SYMBOLS]: boot shim/loader/outq/Image (phone image, QEMU GIC)
 # with tools/qemu_loader.py. vm.overcommit_memory=1 only while QEMU runs (it maps 47 GiB).
 set -u
-P=/mnt/d/DeepSeekHarness/claude/ios_pandora
+P=/mnt/d/workbuddy/ios/data-a-live-main
 O=$1; SECS=${2:-120}; K=${3:-}
 old=$(cat /proc/sys/vm/overcommit_memory)
 trap 'echo $old > /proc/sys/vm/overcommit_memory' EXIT

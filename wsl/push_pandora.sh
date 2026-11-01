@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-cd /mnt/d/DeepSeekHarness/claude/ios_pandora
+cd /mnt/d/workbuddy/ios/data-a-live-main
 git add -A
 git status --short | grep -v -E '^(A |M ) *(xnu/patches/|wsl/|\.github/)' || true
 git commit -q -m "PANDORA machine config: fuxi patches 0082-0101, 4 KiB pages, UniXNU native-4k patches

@@ -55,7 +55,7 @@ sub("""	registerService();
 open(p, 'w').write(s)
 
 # The self-test thread.
-open('bsd/dev/pandora_selftest.c', 'w').write(open('/mnt/d/DeepSeekHarness/claude/ios_pandora/wsl/pandora_selftest.c').read().replace('\r', ''))
+open('bsd/dev/pandora_selftest.c', 'w').write(open('/mnt/d/workbuddy/ios/data-a-live-main/wsl/pandora_selftest.c').read().replace('\r', ''))
 
 p = 'bsd/dev/sweet_ufs.c'
 s = open(p).read()

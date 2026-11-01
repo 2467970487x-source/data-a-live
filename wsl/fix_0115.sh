@@ -5,7 +5,7 @@ git diff --quiet || { echo "tree dirty"; exit 1; }
 python3 - <<'PY'
 p = 'bsd/dev/sweet_ufs.c'
 t = open(p).read()
-gpt = open('/mnt/d/DeepSeekHarness/claude/ios_pandora/wsl/pandora_ufs_gpt.c.txt').read()
+gpt = open('/mnt/d/workbuddy/ios/data-a-live-main/wsl/pandora_ufs_gpt.c.txt').read()
 anchor = "/* Not ported to SM8850 yet:"
 assert t.count(anchor) == 1
 t = t.replace(anchor, gpt + anchor)
@@ -19,5 +19,5 @@ t = t.replace(old, new)
 open(p, 'w').write(t)
 PY
 git diff --stat
-git diff > /mnt/d/DeepSeekHarness/claude/ios_pandora/xnu/patches/0115-pandora-readonly-ufs-gpt-read.patch
+git diff > /mnt/d/workbuddy/ios/data-a-live-main/xnu/patches/0115-pandora-readonly-ufs-gpt-read.patch
 git add -A && git -c user.name=t -c user.email=t@t commit -qm 0115

@@ -1,6 +1,6 @@
 import subprocess
 
-W = '/mnt/d/DeepSeekHarness/claude/ios_pandora/wsl/'
+W = '/mnt/d/workbuddy/ios/data-a-live-main/wsl/'
 UNIXNU = '/mnt/d/DeepSeekHarness/claude/unixnu_review/src/kits/NativePrelink/patches/'
 
 

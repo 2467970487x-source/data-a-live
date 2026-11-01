@@ -5,7 +5,7 @@ git diff --quiet || { echo "tree dirty"; exit 1; }
 python3 - <<'PY'
 p = 'bsd/dev/sweet_ufs.c'
 t = open(p).read()
-h8 = open('/mnt/d/DeepSeekHarness/claude/ios_pandora/wsl/pandora_ufs_h8.c.txt').read()
+h8 = open('/mnt/d/workbuddy/ios/data-a-live-main/wsl/pandora_ufs_h8.c.txt').read()
 anchor = "static void\npandora_ufs_gpt(void)\n"
 assert t.count(anchor) == 1
 t = t.replace(anchor, h8 + anchor)
@@ -41,5 +41,5 @@ t = t.replace(old, new)
 open(p, 'w').write(t)
 PY
 git diff --stat
-git diff > /mnt/d/DeepSeekHarness/claude/ios_pandora/xnu/patches/0118-pandora-ufs-hibern8-exit.patch
+git diff > /mnt/d/workbuddy/ios/data-a-live-main/xnu/patches/0118-pandora-ufs-hibern8-exit.patch
 git add -A && git -c user.name=t -c user.email=t@t commit -qm 0118

@@ -4,8 +4,8 @@
 set -e
 R=$1; SECS=${2:-40}; EXTRA=${3:-}; RD=${RAMDISK:-}
 T=/opt/work/tools; mkdir -p $T
-for f in adt.py mkadt.py mkpayload.py qemu-sweet.py; do tr -d '\r' < /mnt/d/DeepSeekHarness/claude/ios_pandora/ref/ios-sweet/tools/$f > $T/$f; done
-tr -d '\r' < /mnt/d/DeepSeekHarness/claude/ios_pandora/tools/mkadt_pandora.py > $T/mkadt_pandora.py
+for f in adt.py mkadt.py mkpayload.py qemu-sweet.py; do tr -d '\r' < /mnt/d/workbuddy/ios/data-a-live-main/ref/ios-sweet/tools/$f > $T/$f; done
+tr -d '\r' < /mnt/d/workbuddy/ios/data-a-live-main/tools/mkadt_pandora.py > $T/mkadt_pandora.py
 # Same virt_base rule as make_phone_payload.sh: kexts prelinked below our kernel are loaded too.
 sed -i "s/virt_base = text\['vmaddr'\] & ~(0x2000000 - 1)/virt_base = min(s['vmaddr'] for s in segs) \& ~(0x2000000 - 1)/" $T/mkpayload.py
 grep -q "virt_base = min(s\['vmaddr'\] for s in segs) & ~(0x2000000 - 1)" $T/mkpayload.py

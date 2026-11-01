@@ -91,5 +91,5 @@ sub("""		/* Logical (presented) display coordinates -> panel coordinates. */
 open(p, 'w').write(t)
 PY
 git diff --stat
-git diff > /mnt/d/DeepSeekHarness/claude/ios_pandora/xnu/patches/0126-pandora-sweetfb-fill-scaling.patch
+git diff > /mnt/d/workbuddy/ios/data-a-live-main/xnu/patches/0126-pandora-sweetfb-fill-scaling.patch
 git add -A && git -c user.name=t -c user.email=t@t commit -qm 0126

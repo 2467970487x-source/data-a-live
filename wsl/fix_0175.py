@@ -1,4 +1,4 @@
-W = '/mnt/d/DeepSeekHarness/claude/ios_pandora/wsl/'
+W = '/mnt/d/workbuddy/ios/data-a-live-main/wsl/'
 
 # Adreno 840 bring-up, level 13: a contiguous buffer pool, GPU mappings added to the live
 # context, and submissions framed as Linux a7xx_submit (bsd/dev/pandora_gpu.c, pandora_gpu=13).

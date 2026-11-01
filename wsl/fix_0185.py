@@ -1,4 +1,4 @@
-W = '/mnt/d/DeepSeekHarness/claude/ios_pandora/wsl/'
+W = '/mnt/d/workbuddy/ios/data-a-live-main/wsl/'
 
 # The file installer makes directories ("- MODE PATH" lines in files.txt, bsd/dev/pandora_files.c)
 # through pandora_mkdir, the mkdir syscall's mkdir1at on a kernel-space path (bsd/vfs/vfs_syscalls.c).

@@ -10,14 +10,14 @@
 # Then: wsl/local_build.sh NUMBER OUT SRC... builds on that run. NUMBER is the run's number (xnu #57).
 set -euo pipefail
 RUN=${1:?RUN_ID}; N=${2:?NUMBER}
-GH=/d/DeepSeekHarness/claude/tools/gh/bin/gh.exe
+GH=${GH:-gh}          # gh on PATH (winget install GitHub.cli; gh auth login)
 REPO=ShueiTsuki/data-a-live
-D=/d/DeepSeekHarness/claude/ios_pandora/out-root/ci/$N
+D=/d/workbuddy/ios/data-a-live-main/out-root/ci/$N
 rm -rf "$D" && mkdir -p "$D"
 "$GH" run download "$RUN" -R $REPO -n xnu-buildtree -n xnu-objects -n xnu-kernel -D "$(cygpath -m "$D")"
 "$GH" run view "$RUN" -R $REPO --log > "$D/xnu-ci-$N.full.log"
 ls -la "$D" "$D"/*
-W=/mnt/d/DeepSeekHarness/claude/ios_pandora/out-root/ci/$N
+W=/mnt/d/workbuddy/ios/data-a-live-main/out-root/ci/$N
 MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu-24.04 -u root --exec bash -c "set -e
 R=/opt/work/run$N; rm -rf \$R && mkdir -p \$R/bt \$R/ci/obj \$R/xnu-kernel /opt/work/cilog
 tar xzf $W/xnu-buildtree/buildtree.tgz -C \$R/bt

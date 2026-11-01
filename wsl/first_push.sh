@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
-cd /mnt/d/DeepSeekHarness/claude/ios_pandora
-git config --global --add safe.directory /mnt/d/DeepSeekHarness/claude/ios_pandora
+cd /mnt/d/workbuddy/ios/data-a-live-main
+git config --global --add safe.directory /mnt/d/workbuddy/ios/data-a-live-main
 gh auth setup-git
 id=$(gh api user --jq .id); login=$(gh api user --jq .login)
 git config user.name "$login"

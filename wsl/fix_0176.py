@@ -1,4 +1,4 @@
-W = '/mnt/d/DeepSeekHarness/claude/ios_pandora/wsl/'
+W = '/mnt/d/workbuddy/ios/data-a-live-main/wsl/'
 
 # Adreno 840 bring-up, the buffer pool reserved before launchd (level 13 with
 # its pool taken early; bsd/dev/pandora_gpu.c, pandora_gpu=13).

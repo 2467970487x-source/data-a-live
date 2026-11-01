@@ -1,4 +1,4 @@
-W = '/mnt/d/DeepSeekHarness/claude/ios_pandora/wsl/'
+W = '/mnt/d/workbuddy/ios/data-a-live-main/wsl/'
 
 # Adreno 840: the carved GPU pool mapped in windows only while the kernel touches it (ADT /chosen
 # pandora-gpu-pool, mkadt_pandora.py --gpu-pool), mapped write-combined; bsd/dev/pandora_gpu.c.

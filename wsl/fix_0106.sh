@@ -43,6 +43,6 @@ assert t.count(old)==1
 t=t.replace(old,'/* PAGE_SIZE is not a constant on 4K kernels; size for the smallest page. */\nstatic ppnum_t fg_ppns[FG_SOURCE_BYTES/PAGE_MIN_SIZE+1];')
 open(p,'w').write(t)
 PY
-git diff > /mnt/d/DeepSeekHarness/claude/ios_pandora/xnu/patches/0106-pandora-4k-build-fixes.patch
+git diff > /mnt/d/workbuddy/ios/data-a-live-main/xnu/patches/0106-pandora-4k-build-fixes.patch
 git diff --stat
 git add -A && git -c user.name=t -c user.email=t@t commit -qm 0106

@@ -4,6 +4,6 @@ set -euo pipefail
 . "$HOME/.cargo/env"
 W=/opt/work/lplugin; S=$W/src
 git -C $S/nativemetal checkout -q -- . && git -C $S/nativemetal clean -fdq
-cd /mnt/d/DeepSeekHarness/claude/ios_pandora
+cd /mnt/d/workbuddy/ios/data-a-live-main
 SDK=/opt/work/xcode/sdk16/iPhoneOS16.1.sdk bash tools/metal/build_plugin_linux.sh \
 	$S/unixnu $S/nativemetal $S/nativeadreno $W/metal2vulkan /opt/work/mesa_85f $W/out

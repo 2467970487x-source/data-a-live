@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-cd /mnt/d/DeepSeekHarness/claude/ios_pandora
+cd /mnt/d/workbuddy/ios/data-a-live-main
 git add -A
 git status --short | grep -v -E '^(A |M ) *(xnu/|\.github/|wsl/)' || true
 git commit -q -m "Add ios-sweet XNU patch series and manual-only macOS build workflow

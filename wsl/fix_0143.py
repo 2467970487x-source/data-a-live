@@ -6,7 +6,7 @@ def patch(p, subs):
     open(p, 'w').write(s)
 
 
-open('bsd/dev/pandora_adsp.c', 'w').write(open('/mnt/d/DeepSeekHarness/claude/ios_pandora/wsl/pandora_adsp.c').read().replace('\r', ''))
+open('bsd/dev/pandora_adsp.c', 'w').write(open('/mnt/d/workbuddy/ios/data-a-live-main/wsl/pandora_adsp.c').read().replace('\r', ''))
 patch('bsd/dev/sweet_ufs.c', [
     ("extern void pandora_selftest_init(void);\n", "extern void pandora_selftest_init(void);\nextern void pandora_adsp_init(void);\n"),
     ("""	pandora_selftest_init();

@@ -5,7 +5,7 @@ git diff --quiet || { echo "tree dirty"; exit 1; }
 python3 - <<'PY'
 p = 'bsd/dev/sweet_ufs.c'
 t = open(p).read()
-probe = open('/mnt/d/DeepSeekHarness/claude/ios_pandora/wsl/pandora_ufs_probe.c.txt').read()
+probe = open('/mnt/d/workbuddy/ios/data-a-live-main/wsl/pandora_ufs_probe.c.txt').read()
 anchor = "static int\nsweet_ufs_init(void)\n{\n#if defined(FUXI)\n    uint32_t requested=0;"
 assert t.count(anchor) == 1
 t = t.replace(anchor, probe + "static int\nsweet_ufs_init(void)\n{\n#if defined(PANDORA)\n"
@@ -26,5 +26,5 @@ t = t.replace(old, new)
 open(p, 'w').write(t)
 PY
 git diff --stat
-git diff > /mnt/d/DeepSeekHarness/claude/ios_pandora/xnu/patches/0114-pandora-readonly-ufs-smmu-probe.patch
+git diff > /mnt/d/workbuddy/ios/data-a-live-main/xnu/patches/0114-pandora-readonly-ufs-smmu-probe.patch
 git add -A && git -c user.name=t -c user.email=t@t commit -qm 0114

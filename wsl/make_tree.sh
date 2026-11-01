@@ -3,7 +3,7 @@
 # (pinned 663906528d1c): its sed edits, our *.sh, then blacktop's + our *.patch in sorted order,
 # skipping any that do not apply (as CI does). One git commit per stage.
 set -euo pipefail
-P=/mnt/d/DeepSeekHarness/claude/ios_pandora/xnu/patches
+P=/mnt/d/workbuddy/ios/data-a-live-main/xnu/patches
 D=/opt/work/dxb
 T=/opt/work/tree
 rm -rf $T /opt/work/pd && mkdir -p /opt/work/pd

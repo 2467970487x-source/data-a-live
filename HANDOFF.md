@@ -62,7 +62,7 @@
 - WSL 里要有：clang 18 和 lld 18（含 ld64.lld）、qemu、hfsprogs、dtc、Rust 1.98（加 aarch64-apple-ios 目标）、glslc、spirv-tools、meson、[ipsw](https://github.com/blacktop/ipsw)（查 dyld 缓存）、apfs-fuse（挂 IPSW 的系统盘）、rcodesign（签名）。
 - 本地编 Metal 插件和 Turnip 要一个 iOS 16.1 SDK（只用头文件和 .tbd）。SDK 要自己弄，作者用的那份的 .tbd 里 `platform: (null)` 要改成 `platform: ios`。
 
-脚本里写死了作者电脑上的路径：仓库在 `/mnt/d/DeepSeekHarness/claude/ios_pandora`，工作目录在 WSL 的 `/opt/work`。在别的电脑上用要改这些路径。
+脚本里写死了作者电脑上的路径：仓库在 `/mnt/d/workbuddy/ios/data-a-live-main`，工作目录在 WSL 的 `/opt/work`。在别的电脑上用要改这些路径。
 
 ## 编译
 

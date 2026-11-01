@@ -22,5 +22,5 @@ print('patched')
 PY
 git add -A
 git diff --cached --stat
-git diff --cached > /mnt/d/DeepSeekHarness/claude/ios_pandora/xnu/patches/0132-pandora-keys-default-on.patch
+git diff --cached > /mnt/d/workbuddy/ios/data-a-live-main/xnu/patches/0132-pandora-keys-default-on.patch
 git -c user.name=t -c user.email=t@t commit -qm 0132

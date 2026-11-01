@@ -74,7 +74,7 @@ sub("""    error = ufs_take_over_host();
         static const uint8_t active[6]""", "h8")
 
 # 6. pandora_ufs_probe=3: the real init, then one READ of the partition's block 1.
-test = open('/mnt/d/DeepSeekHarness/claude/ios_pandora/wsl/pandora_ufs_drvtest.c.txt').read()
+test = open('/mnt/d/workbuddy/ios/data-a-live-main/wsl/pandora_ufs_drvtest.c.txt').read()
 sub("""#if defined(FUXI)
 void fuxi_storage_probe(void);
 """, test + """#if defined(FUXI)
@@ -87,5 +87,5 @@ sub("""  if (probe==2) pandora_ufs_gpt();
 open(p, 'w').write(t)
 PY
 git diff --stat
-git diff > /mnt/d/DeepSeekHarness/claude/ios_pandora/xnu/patches/0120-pandora-ufs-driver-init.patch
+git diff > /mnt/d/workbuddy/ios/data-a-live-main/xnu/patches/0120-pandora-ufs-driver-init.patch
 git add -A && git -c user.name=t -c user.email=t@t commit -qm 0120

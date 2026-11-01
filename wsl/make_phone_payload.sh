@@ -11,7 +11,7 @@
 set -e
 R=$1; EXTRA=${2:-}; N=${NAME:-out}; CPUS=${CPUS:-1}; RD=${RD:-md0}; DEBUG=${DEBUG:-0xc}
 RAMDISK=(); [ "$RD" = md0 ] && RAMDISK=(--ramdisk /opt/work/init/sweet-init)
-P=/mnt/d/DeepSeekHarness/claude/ios_pandora; T=/opt/work/tools; mkdir -p $T
+P=/mnt/d/workbuddy/ios/data-a-live-main; T=/opt/work/tools; mkdir -p $T
 for f in adt.py mkadt.py mkpayload.py; do tr -d '\r' < $P/ref/ios-sweet/tools/$f > $T/$f; done
 tr -d '\r' < $P/tools/mkadt_pandora.py > $T/mkadt_pandora.py
 tr -d '\r' < $P/tools/addtrustcache.py > $T/addtrustcache.py

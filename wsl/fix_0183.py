@@ -1,4 +1,4 @@
-W = '/mnt/d/DeepSeekHarness/claude/ios_pandora/wsl/'
+W = '/mnt/d/workbuddy/ios/data-a-live-main/wsl/'
 
 # GPU bring-up without the 3.5 s log-flush wait per step unless pandora_gpu_slow=1
 # (bsd/dev/pandora_gpu.c).

@@ -57,8 +57,8 @@ bootmgr/build.sh --slot-from 文件 --any-mode --wait-ms 9000         # 测试�
 ```
 python -I bootmgr/test/fdt_test.py     # 认开机模式（用手机的设备树）
 python -I bootmgr/test/sum_test.py     # 菜单和打包工具算的校验值一致
-MSYS_NO_PATHCONV=1 wsl -d Ubuntu-24.04 -- bash /mnt/d/DeepSeekHarness/claude/ios_pandora/bootmgr/test/guard_test.sh
-MSYS_NO_PATHCONV=1 wsl -d Ubuntu-24.04 -- bash /mnt/d/DeepSeekHarness/claude/ios_pandora/bootmgr/test/update_test.sh
+MSYS_NO_PATHCONV=1 wsl -d Ubuntu-24.04 -- bash /mnt/d/workbuddy/ios/data-a-live-main/bootmgr/test/guard_test.sh
+MSYS_NO_PATHCONV=1 wsl -d Ubuntu-24.04 -- bash /mnt/d/workbuddy/ios/data-a-live-main/bootmgr/test/update_test.sh
 ```
 
 ## 先不写入地测试

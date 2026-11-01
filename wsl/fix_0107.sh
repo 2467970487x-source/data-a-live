@@ -40,6 +40,6 @@ new='''#if (defined(XNU_PLATFORM_MacOSX) || defined(XNU_PLATFORM_DriverKit)) && 
 t=t.replace(old,new); open(p,'w').write(t)
 PY
 git diff --stat
-git diff > /mnt/d/DeepSeekHarness/claude/ios_pandora/xnu/patches/0107-pandora-ios-address-layout.patch
+git diff > /mnt/d/workbuddy/ios/data-a-live-main/xnu/patches/0107-pandora-ios-address-layout.patch
 git add -A && git -c user.name=t -c user.email=t@t commit -qm 0107
 grep -n 'CURRENT_MACHINE_CONFIG' makedefs/MakeInc.def | head -5

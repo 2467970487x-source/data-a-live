@@ -15,5 +15,5 @@ open(p, 'w').write(t)
 PY
 grep -n "MACHINE_FLAGS_ARM64_PANDORA" makedefs/MakeInc.def
 git diff --stat
-git diff > /mnt/d/DeepSeekHarness/claude/ios_pandora/xnu/patches/0124-pandora-native-4k-cs-hash-cache-on.patch
+git diff > /mnt/d/workbuddy/ios/data-a-live-main/xnu/patches/0124-pandora-native-4k-cs-hash-cache-on.patch
 git add -A && git -c user.name=t -c user.email=t@t commit -qm 0124

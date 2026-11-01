@@ -5,7 +5,7 @@ git diff --quiet || { echo "tree dirty"; exit 1; }
 python3 - <<'PY'
 p = 'bsd/dev/sweet_ufs.c'
 t = open(p).read()
-W = '/mnt/d/DeepSeekHarness/claude/ios_pandora/wsl/'
+W = '/mnt/d/workbuddy/ios/data-a-live-main/wsl/'
 
 
 def sub(old, new, what):
@@ -71,5 +71,5 @@ t = t[:j] + "\n" + open(W + 'pandora_log.c.txt').read() + t[j:]
 open(p, 'w').write(t)
 PY
 git diff --stat
-git diff > /mnt/d/DeepSeekHarness/claude/ios_pandora/xnu/patches/0129-pandora-log-file-and-psci-restart.patch
+git diff > /mnt/d/workbuddy/ios/data-a-live-main/xnu/patches/0129-pandora-log-file-and-psci-restart.patch
 git add -A && git -c user.name=t -c user.email=t@t commit -qm 0129

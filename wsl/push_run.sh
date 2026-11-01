@@ -1,7 +1,7 @@
 #!/bin/bash
 # Commit everything staged-able, push, start a PANDORA build. Usage: push_run.sh "commit message"
 set -e
-cd /mnt/d/DeepSeekHarness/claude/ios_pandora
+cd /mnt/d/workbuddy/ios/data-a-live-main
 git add -A
 git status --short | grep -v -E '^(A |M ) *(xnu/patches/|wsl/|\.github/)' || true
 git commit -q -m "$1

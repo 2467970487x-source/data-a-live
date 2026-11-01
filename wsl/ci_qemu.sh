@@ -2,7 +2,7 @@
 # ci_qemu.sh RUNID N [SECS] [extra cmdline]: wait for CI, fetch to /opt/work/runN, boot in QEMU, summarize.
 set -u
 ID=$1; N=$2; SECS=${3:-60}; EXTRA=${4:-}
-W=/mnt/d/DeepSeekHarness/claude/ios_pandora/wsl
+W=/mnt/d/workbuddy/ios/data-a-live-main/wsl
 bash $W/ci_fetch.sh $ID $N
 [ -f /opt/work/run$N/xnu-kernel/kernel.development.pandora ] || { echo "no kernel"; exit 1; }
 bash $W/qemu_run.sh /opt/work/run$N $SECS "$EXTRA" > /opt/work/run$N/qemu_run.out 2>&1

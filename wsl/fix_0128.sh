@@ -13,7 +13,7 @@ def sub(old, new, what):
     t = t.replace(old, new)
 
 
-pk = open('/mnt/d/DeepSeekHarness/claude/ios_pandora/wsl/pandora_keys.c.txt').read()
+pk = open('/mnt/d/workbuddy/ios/data-a-live-main/wsl/pandora_keys.c.txt').read()
 sub("""static void
 fk_thread(void *arg, wait_result_t result)
 {""", pk + """static void
@@ -72,5 +72,5 @@ fk_setup(void)
 open(p, 'w').write(t)
 PY
 git diff --stat
-git diff > /mnt/d/DeepSeekHarness/claude/ios_pandora/xnu/patches/0128-pandora-keys-spmi-v8-tlmm.patch
+git diff > /mnt/d/workbuddy/ios/data-a-live-main/xnu/patches/0128-pandora-keys-spmi-v8-tlmm.patch
 git add -A && git -c user.name=t -c user.email=t@t commit -qm 0128
