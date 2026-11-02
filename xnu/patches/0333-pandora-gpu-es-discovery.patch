@@ -10,34 +10,7 @@ diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdr
  		return kIOReturnUnsupported;
  	}
  	int c = pandora_gpu_open();
-@@ -591,19 +591,117 @@ PandoraAdrenoGpu::newUserClient(task_t owningTask, void *securityID, UInt32 type
- }
- 
- /*
-- * Metal's discovery (patch 0184): Metal.framework looks up IOServiceMatching("IOAcceleratorES")
-- * and loads /System/Library/Extensions/<MetalPluginName>.bundle, class MetalPluginClassName; Turnip's
-- * Darwin backend, without TU_DARWIN_SERVICE, also opens IOAcceleratorES (type 0x4147, NTNL tunnel).
-- * IOAcceleratorES here is the empty in-kernel class of the fuxi lane (FuxiAdrenoUserClient.cpp,
-- * compiled into this kernel; Apple's IOGPUFamily is not loaded), declared again to derive from it.
-- * The class is named AGXAccelerator as UniXNU's is, the name Apple's sandbox profiles accept. It is
-- * published only with boot-arg pandora_gpu_metal=1: once it exists, every process that starts
-- * Metal (backboardd first) finds it and goes looking for the plugin.
-+ * Metal's discovery (patch 0333): Metal.framework calls
-+ * IOServiceMatching("IOAcceleratorES") - 210 times per boot - and then loads
-+ * /System/Library/Extensions/<MetalPluginName>.bundle, class MetalPluginClassName.
-+ * Turnip's Darwin backend, without TU_DARWIN_SERVICE, opens the same node with
-+ * type 0x4147 (NTNL tunnel).
-+ *
-+ * The class name has to be exactly "IOAcceleratorES": IOServiceMatching() resolves
-+ * through OSMetaClass::applyToInstancesOfClassName() ->
-+ * sAllClassesDict->getObject(name), so it walks one metaclass's instance set and never
-+ * looks at subclasses (that is why AGXAccelerator, a subclass, answered none of the
-+ * 210 calls). Patch 0184 used to sit on that name via an empty fuxi-lane class; 0333
-+ * renamed that one to FuxiAcceleratorES and publishes this node here instead.
-+ *
-+ * Published only with boot-arg pandora_gpu_metal=1. AGXAccelerator stays as the
-+ * UniXNU-compatible alias but no longer has a personality, so only one node exists -
-+ * two nodes would make Metal see two GPUs.
+@@ -602,8 +602,120 @@ PandoraAdrenoGpu::newUserClient(task_t owningTask, void *securityID, UInt32 type
   */
  class IOAcceleratorES : public IOService {
  	OSDeclareDefaultStructors(IOAcceleratorES);
@@ -50,7 +23,9 @@ diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdr
  
 +OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
 +
-+/* The query Apple's userland issues, run from the kernel. */
++static int pandora_gpu_es_started;
++
++/* Query exactly as Apple's userland issues it, from the kernel. */
 +static IOService *
 +pandora_gpu_es_query(bool userland)
 +{
@@ -66,11 +41,12 @@ diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdr
 +}
 +
 +static void
-+pandora_gpu_es_report(const char *when)
++pandora_gpu_es_sample(IOService *es, const char *when)
 +{
 +	IOService *plain = pandora_gpu_es_query(false);
 +	IOService *uland = pandora_gpu_es_query(true);
-+	IOLog("PANDORA GPU ES: %s plain %s, userland %s\n", when,
++	IOLog("PANDORA GPU ES: %s state %#x rc %d plane %d, plain %s, userland %s\n", when,
++	    es->getState(), es->getRetainCount(), es->inPlane(gIOServicePlane),
 +	    plain ? plain->getMetaClass()->getClassName() : "none",
 +	    uland ? uland->getMetaClass()->getClassName() : "none");
 +	if (plain) {
@@ -87,20 +63,23 @@ diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdr
 +	IOService *es = static_cast<IOService *>(arg);
 +	/*
 +	 * registerService() from inside a personality start() only queues a match job, and at 0.139 s
-+	 * the platform workloop is not dispatching yet: the job never reaches doServiceMatch(), so the
-+	 * service never gets kIOServiceRegisteredState/kIOServiceMatchedState and IOServiceMatching()
-+	 * answers nothing for the whole boot. Register late and synchronously instead - that runs
-+	 * doServiceMatch() inline.
++	 * the platform workloop is not dispatching, so the job never reaches doServiceMatch(). Register
++	 * late and synchronously instead: that runs the match inline.
 +	 */
 +	IOSleep(1500);
 +	es->registerService(kIOServiceSynchronous);
-+	IOLog("PANDORA GPU ES: registered at boot+1.5 s, state %#x plane %d\n", es->getState(),
-+	    es->inPlane(gIOServicePlane));
-+	pandora_gpu_es_report("after register");
-+	/* backboardd starts asking around 28 s; sample inside its window. */
++	pandora_gpu_es_sample(es, "after register");
++	/*
++	 * backboardd asks between 29 s and 55 s (log18: 206 iterator queries at 29.067 s, then single
++	 * service queries at 49.835 s and 54.89 s). Sample every 2 s across that window so the log
++	 * shows whether the node disappears, gets terminated, or breaks its reference count.
++	 */
 +	IOSleep(44000);
-+	pandora_gpu_es_report("at boot+45 s");
-+	/* Deliberately no release: the registry holds no reference, so letting go frees the node. */
++	for (int i = 0; i < 6; i++) {
++		pandora_gpu_es_sample(es, "window");
++		IOSleep(2000);
++	}
++	/* No release of `es`: the registry holds no reference of its own. */
 +}
 +
 +bool
@@ -108,9 +87,25 @@ diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdr
 +{
 +	int metal = 0;
 +	(void)PE_parse_boot_argn("pandora_gpu_metal", &metal, sizeof(metal));
-+	if (!metal || !IOService::start(provider)) {
++	if (!metal) {
 +		return false;
 +	}
++	IOLog("PANDORA GPU ES: start call %d, state %#x rc %d\n", pandora_gpu_es_started + 1,
++	    getState(), getRetainCount());
++	/*
++	 * registerService() re-runs matching for the node, and that calls start() a second time. The
++	 * second IOService::start() fails (already started), and returning false there makes doServiceMatch
++	 * terminate the node; terminate() is queued, not synchronous, so the node stayed visible for a
++	 * while and then vanished - log18 answers the in-kernel query at 45.6 s and backboardd's identical
++	 * query at 49.8 s gets nothing. Accept every call after the first.
++	 */
++	if (pandora_gpu_es_started) {
++		return true;
++	}
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	pandora_gpu_es_started = 1;
 +	setName("NativeAdrenoGpu");
 +	setProperty("MetalPluginName", "NativeAdrenoMetal");
 +	setProperty("MetalPluginClassName", "NativeAdrenoMetalDevice");
