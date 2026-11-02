@@ -19,10 +19,10 @@ diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdr
 + * Metal's discovery (patch 0333). IOServiceMatching("X") resolves through
 + * OSMetaClass::applyToInstancesOfClassName(): it looks the name up in sAllClassesDict and walks that
 + * one class's instance set - exact class name, no subclass walk, no provider check. So AGXAccelerator
-+ * (a subclass of IOAcceleratorES, registered at 0.139 s) can never answer the 211 IOAcceleratorES
-+ * lookups backboardd makes per boot. Publish a service whose class name is one iOS asks for, hand out
-+ * the same AGXDeviceUserClient AGXAccelerator does: type 0 is Metal's own IOServiceOpen, 0x4147 is
-+ * Turnip's raw ABI.
++ * (a subclass of IOAcceleratorES) can never answer the 225 IOAcceleratorES lookups backboardd makes
++ * per boot. Publish a service whose class name is one iOS asks for, handing out the same
++ * AGXDeviceUserClient AGXAccelerator does: type 0 is Metal's own IOServiceOpen, 0x4147 is Turnip's
++ * raw ABI.
 + */
 +class IOAcceleratorESLegacy : public IOAcceleratorES {
 +	OSDeclareDefaultStructors(IOAcceleratorESLegacy);
@@ -54,9 +54,8 @@ diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdr
 +	/*
 +	 * registerService() from inside a personality start() only queues a match job, and at 0.139 s
 +	 * the platform workloop is not dispatching yet: the job never reaches doServiceMatch() and the
-+	 * service stays without kIOServiceRegisteredState/kIOServiceMatchedState for the whole boot
-+	 * (log13: 211 x "IOAcceleratorES -> 0 found"). Register late and synchronously, so
-+	 * doServiceMatch() runs inline.
++	 * service stays without kIOServiceRegisteredState/kIOServiceMatchedState for the whole boot.
++	 * Register late and synchronously, so doServiceMatch() runs inline.
 +	 */
 +	IOSleep(1500);
 +	es->registerService(kIOServiceSynchronous);
@@ -67,11 +66,8 @@ diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdr
 +	if (early) {
 +		early->release();
 +	}
-+	/*
-+	 * backboardd asks at 28-55 s, so check again there: this tells apart "never registered" from
-+	 * "was registered and then dropped out of the registry".
-+	 */
-+	IOSleep(28000);
++	/* backboardd asks between 28 s and 55 s: still there at 45 s means it is there when asked. */
++	IOSleep(44000);
 +	IOService *late = pandora_gpu_es_query();
 +	IOLog("PANDORA GPU ES: late state %#x plane %d, self-query -> %s\n", es->getState(),
 +	    es->inPlane(gIOServicePlane),
@@ -79,7 +75,11 @@ diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdr
 +	if (late) {
 +		late->release();
 +	}
-+	es->release();
++	/*
++	 * Deliberately no release of `es`: the personality has already dropped its reference by now and
++	 * the registry does not hold one either, so letting go here frees the service and detaches it.
++	 * log14 held the node at 1.6 s (state 0x1e) and lost it before backboardd's 49.8 s query.
++	 */
 +}
 +
 +bool
@@ -93,7 +93,7 @@ diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdr
 +	setName("NativeAdrenoGpu");
 +	setProperty("MetalPluginName", "NativeAdrenoMetal");
 +	setProperty("MetalPluginClassName", "NativeAdrenoMetalDevice");
-+	/* Registration is deferred: see pandora_gpu_es_publish_thread(). */
++	/* Registration is deferred: see pandora_gpu_es_publish_thread(). The retain keeps it alive. */
 +	retain();
 +	thread_t thread;
 +	if (kernel_thread_start(pandora_gpu_es_publish_thread, this, &thread) != KERN_SUCCESS) {
