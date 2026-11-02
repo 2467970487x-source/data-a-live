@@ -1,0 +1,81 @@
+diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
+--- a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
++++ b/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
+@@ -547,7 +547,7 @@ PandoraAdrenoGpu::start(IOService *provider)
+ static IOReturn
+ pandora_gpu_new_client(IOService *owner, task_t owningTask, void *securityID, UInt32 type, IOUserClient **handler)
+ {
+-	if (type != PANDORA_GPU_OPEN_TYPE) {
++	if (type != PANDORA_GPU_OPEN_TYPE && type != 0) {
+ 		return kIOReturnUnsupported;
+ 	}
+ 	int c = pandora_gpu_open();
+@@ -637,6 +637,50 @@ AGXAccelerator::newUserClient(task_t owningTask, void *securityID, UInt32 type,
+ {
+ 	return pandora_gpu_new_client(this, owningTask, securityID, type, handler);
+ }
++
++/*
++ * Metal's discovery (patch 0333). It asks the kernel for IOServiceMatching("IOAcceleratorES") and,
++ * when that comes back empty, IOServiceMatching("IOAcceleratorESLegacy") (log11: 185 and 7 calls per
++ * boot, every one empty). AGXAccelerator derives from IOAcceleratorES, but the lookup does not match
++ * subclass names, so publish a service whose class name is one Metal asks for, carrying the plugin
++ * properties, and hand out the same AGXDeviceUserClient AGXAccelerator does. Open type 0 is Metal's
++ * own IOServiceOpen; 0x4147 is Turnip's raw ABI.
++ */
++class IOAcceleratorESLegacy : public IOAcceleratorES {
++	OSDeclareDefaultStructors(IOAcceleratorESLegacy);
++
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type, OSDictionary *properties,
++	    IOUserClient **handler) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(IOAcceleratorESLegacy, IOAcceleratorES);
++
++bool
++IOAcceleratorESLegacy::start(IOService *provider)
++{
++	int metal = 0;
++	(void)PE_parse_boot_argn("pandora_gpu_metal", &metal, sizeof(metal));
++	if (!metal || !IOService::start(provider)) {
++		return false;
++	}
++	setName("NativeAdrenoGpu");
++	setProperty("MetalPluginName", "NativeAdrenoMetal");
++	setProperty("MetalPluginClassName", "NativeAdrenoMetalDevice");
++	registerService();
++	IOLog("PANDORA GPU ES: published as IOAcceleratorESLegacy, plugin NativeAdrenoMetal\n");
++	return true;
++}
++
++IOReturn
++IOAcceleratorESLegacy::newUserClient(task_t owningTask, void *securityID, UInt32 type,
++    __unused OSDictionary *properties, IOUserClient **handler)
++{
++	IOLog("PANDORA GPU ES: open type 0x%x\n", type);
++	return pandora_gpu_new_client(this, owningTask, securityID, type, handler);
++}
++
+ /* For bsd/dev/pandora_gpu.c: unpin an imported buffer (its BoImport descriptor). */
+ extern "C" void
+ pandora_gpu_release_ref(void *ref)
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -70,9 +70,14 @@
+     "   {"
+     "     'IOClass'         = AGXAccelerator;"
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = AGXAccelerator;"
+     "   },"
++    "     'IOClass'         = IOAcceleratorESLegacy;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = IOAcceleratorESLegacy;"
++    "   },"
++    "   {"
+     "   {"
+     "     'IOClass'         = IOWatchdog;"
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = IOWatchdog;"
