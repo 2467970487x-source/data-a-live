@@ -10,7 +10,7 @@ diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdr
  		return kIOReturnUnsupported;
  	}
  	int c = pandora_gpu_open();
-@@ -637,6 +637,103 @@ AGXAccelerator::newUserClient(task_t owningTask, void *securityID, UInt32 type,
+@@ -637,6 +637,111 @@ AGXAccelerator::newUserClient(task_t owningTask, void *securityID, UInt32 type,
  {
  	return pandora_gpu_new_client(this, owningTask, securityID, type, handler);
  }
@@ -35,16 +35,29 @@ diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdr
 +
 +OSDefineMetaClassAndStructors(IOAcceleratorESLegacy, IOAcceleratorES);
 +
-+/* The query iOS issues, run from the kernel: same dictionary, same filter bit. */
++/*
++ * Queries exactly as iOS issues them. IOTaskRegistryCompatibilityMatching() adds
++ * IOServiceNotificationUser=true to every userland match dictionary, so run both forms: if the plain
++ * one answers and the tagged one does not, the tag itself is the filter.
++ */
 +static IOService *
-+pandora_gpu_es_query(void)
++pandora_gpu_es_query(bool userland)
 +{
 +	OSDictionary *m = IOService::serviceMatching("IOAcceleratorESLegacy");
++	if (m && userland) {
++		m->setObject("IOServiceNotificationUser", kOSBooleanTrue);
++	}
 +	IOService *found = m ? IOService::copyMatchingService(m) : nullptr;
 +	if (m) {
 +		m->release();
 +	}
 +	return found;
++}
++
++static const char *
++pandora_gpu_es_class(IOService *s)
++{
++	return s ? s->getMetaClass()->getClassName() : "none";
 +}
 +
 +static void
@@ -53,33 +66,28 @@ diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdr
 +	IOService *es = static_cast<IOService *>(arg);
 +	/*
 +	 * registerService() from inside a personality start() only queues a match job, and at 0.139 s
-+	 * the platform workloop is not dispatching yet: the job never reaches doServiceMatch() and the
-+	 * service stays without kIOServiceRegisteredState/kIOServiceMatchedState for the whole boot.
-+	 * Register late and synchronously, so doServiceMatch() runs inline.
++	 * the platform workloop is not dispatching yet, so the job never reaches doServiceMatch().
++	 * Register late and synchronously instead.
 +	 */
 +	IOSleep(1500);
 +	es->registerService(kIOServiceSynchronous);
-+	IOService *early = pandora_gpu_es_query();
-+	IOLog("PANDORA GPU ES: early state %#x plane %d, self-query -> %s\n", es->getState(),
-+	    es->inPlane(gIOServicePlane),
-+	    early ? early->getMetaClass()->getClassName() : "none");
-+	if (early) {
-+		early->release();
++	/* backboardd asks between 28 s and 55 s; sample across that window. */
++	static const int gap[] = { 44000, 3000, 3000, 3000 };
++	for (unsigned int i = 0; i < sizeof(gap) / sizeof(gap[0]); i++) {
++		IOSleep(gap[i]);
++		IOService *plain = pandora_gpu_es_query(false);
++		IOService *uland = pandora_gpu_es_query(true);
++		IOLog("PANDORA GPU ES: sample %u state %#x plane %d, plain %s, userland %s\n", i,
++		    es->getState(), es->inPlane(gIOServicePlane),
++		    pandora_gpu_es_class(plain), pandora_gpu_es_class(uland));
++		if (plain) {
++			plain->release();
++		}
++		if (uland) {
++			uland->release();
++		}
 +	}
-+	/* backboardd asks between 28 s and 55 s: still there at 45 s means it is there when asked. */
-+	IOSleep(44000);
-+	IOService *late = pandora_gpu_es_query();
-+	IOLog("PANDORA GPU ES: late state %#x plane %d, self-query -> %s\n", es->getState(),
-+	    es->inPlane(gIOServicePlane),
-+	    late ? late->getMetaClass()->getClassName() : "none");
-+	if (late) {
-+		late->release();
-+	}
-+	/*
-+	 * Deliberately no release of `es`: the personality has already dropped its reference by now and
-+	 * the registry does not hold one either, so letting go here frees the service and detaches it.
-+	 * log14 held the node at 1.6 s (state 0x1e) and lost it before backboardd's 49.8 s query.
-+	 */
++	/* No release of `es` on purpose: the trait is the only reference keeping it in the registry. */
 +}
 +
 +bool
