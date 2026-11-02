@@ -10,18 +10,20 @@ diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdr
  		return kIOReturnUnsupported;
  	}
  	int c = pandora_gpu_open();
-@@ -637,6 +637,50 @@ AGXAccelerator::newUserClient(task_t owningTask, void *securityID, UInt32 type,
+@@ -637,6 +637,61 @@ AGXAccelerator::newUserClient(task_t owningTask, void *securityID, UInt32 type,
  {
  	return pandora_gpu_new_client(this, owningTask, securityID, type, handler);
  }
 +
 +/*
-+ * Metal's discovery (patch 0333). It asks the kernel for IOServiceMatching("IOAcceleratorES") and,
-+ * when that comes back empty, IOServiceMatching("IOAcceleratorESLegacy") (log11: 185 and 7 calls per
-+ * boot, every one empty). AGXAccelerator derives from IOAcceleratorES, but the lookup does not match
-+ * subclass names, so publish a service whose class name is one Metal asks for, carrying the plugin
-+ * properties, and hand out the same AGXDeviceUserClient AGXAccelerator does. Open type 0 is Metal's
-+ * own IOServiceOpen; 0x4147 is Turnip's raw ABI.
++ * Metal's discovery (patch 0333). IOServiceMatching("X") is resolved by
++ * OSMetaClass::applyToInstancesOfClassName(), which looks the name up in sAllClassesDict and walks
++ * that one class's instance set - exact class name, no subclass walk, no provider check. So
++ * AGXAccelerator (a subclass of IOAcceleratorES, registered at 0.139 s in log11) can never answer
++ * the 185 IOAcceleratorES lookups backboardd makes per boot. Publish a service whose class name is
++ * one iOS actually asks for (log11 also showed 7 IOAcceleratorESLegacy lookups) and hand out the
++ * same AGXDeviceUserClient AGXAccelerator does. Open type 0 is Metal's own IOServiceOpen; 0x4147 is
++ * Turnip's raw ABI.
 + */
 +class IOAcceleratorESLegacy : public IOAcceleratorES {
 +	OSDeclareDefaultStructors(IOAcceleratorESLegacy);
@@ -46,7 +48,17 @@ diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdr
 +	setProperty("MetalPluginName", "NativeAdrenoMetal");
 +	setProperty("MetalPluginClassName", "NativeAdrenoMetalDevice");
 +	registerService();
-+	IOLog("PANDORA GPU ES: published as IOAcceleratorESLegacy, plugin NativeAdrenoMetal\n");
++	/* Self-test: does the registry answer the same query iOS asks? */
++	{
++		OSDictionary *m = IOService::serviceMatching("IOAcceleratorESLegacy");
++		IOService *found = m ? IOService::copyMatchingService(m) : nullptr;
++		IOLog("PANDORA GPU ES: class %s, self-query -> %s\n",
++		    getMetaClass()->getClassName(),
++		    found ? found->getMetaClass()->getClassName() : "none");
++		if (m) {
++			m->release();
++		}
++	}
 +	return true;
 +}
 +
@@ -57,24 +69,23 @@ diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdr
 +	IOLog("PANDORA GPU ES: open type 0x%x\n", type);
 +	return pandora_gpu_new_client(this, owningTask, securityID, type, handler);
 +}
-+
  /* For bsd/dev/pandora_gpu.c: unpin an imported buffer (its BoImport descriptor). */
  extern "C" void
  pandora_gpu_release_ref(void *ref)
 diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
 --- a/iokit/KernelConfigTables.cpp
 +++ b/iokit/KernelConfigTables.cpp
-@@ -70,9 +70,14 @@
+@@ -70,9 +70,14 @@ const char * gIOKernelConfigTables =
      "   {"
      "     'IOClass'         = AGXAccelerator;"
      "     'IOProviderClass' = IOResources;"
      "     'IOMatchCategory' = AGXAccelerator;"
      "   },"
++    "   {"
 +    "     'IOClass'         = IOAcceleratorESLegacy;"
 +    "     'IOProviderClass' = IOResources;"
 +    "     'IOMatchCategory' = IOAcceleratorESLegacy;"
 +    "   },"
-+    "   {"
      "   {"
      "     'IOClass'         = IOWatchdog;"
      "     'IOProviderClass' = IOResources;"
