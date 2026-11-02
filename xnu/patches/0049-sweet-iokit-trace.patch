@@ -10,7 +10,7 @@
 +/*
 + * SWEET IOKit trace: registry and matching calls made by the processes
 + * named in boot-arg sweetiolog (comma separated, default "backboardd";
-+ * "-" turns it off) are printed as "IOK name: ...", at most 400 lines per
++ * "-" turns it off) are printed as "IOK name: ...", at most 2000 lines per
 + * boot, to find out what a daemon looks for before it gives up.
 + */
 +static char sweet_iolog_names[128];
@@ -26,7 +26,7 @@
 +		}
 +		sweet_iolog_parsed = 1;
 +	}
-+	if (sweet_iolog_lines >= 400) {
++	if (sweet_iolog_lines >= 2000) {
 +		return false;
 +	}
 +	proc_selfname(name, (int)len);

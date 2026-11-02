@@ -10,40 +10,51 @@ diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdr
  		return kIOReturnUnsupported;
  	}
  	int c = pandora_gpu_open();
-@@ -637,6 +637,111 @@ AGXAccelerator::newUserClient(task_t owningTask, void *securityID, UInt32 type,
- {
- 	return pandora_gpu_new_client(this, owningTask, securityID, type, handler);
+@@ -591,19 +591,117 @@ PandoraAdrenoGpu::newUserClient(task_t owningTask, void *securityID, UInt32 type
  }
-+
-+/*
-+ * Metal's discovery (patch 0333). IOServiceMatching("X") resolves through
-+ * OSMetaClass::applyToInstancesOfClassName(): it looks the name up in sAllClassesDict and walks that
-+ * one class's instance set - exact class name, no subclass walk, no provider check. So AGXAccelerator
-+ * (a subclass of IOAcceleratorES) can never answer the 225 IOAcceleratorES lookups backboardd makes
-+ * per boot. Publish a service whose class name is one iOS asks for, handing out the same
-+ * AGXDeviceUserClient AGXAccelerator does: type 0 is Metal's own IOServiceOpen, 0x4147 is Turnip's
-+ * raw ABI.
-+ */
-+class IOAcceleratorESLegacy : public IOAcceleratorES {
-+	OSDeclareDefaultStructors(IOAcceleratorESLegacy);
+ 
+ /*
+- * Metal's discovery (patch 0184): Metal.framework looks up IOServiceMatching("IOAcceleratorES")
+- * and loads /System/Library/Extensions/<MetalPluginName>.bundle, class MetalPluginClassName; Turnip's
+- * Darwin backend, without TU_DARWIN_SERVICE, also opens IOAcceleratorES (type 0x4147, NTNL tunnel).
+- * IOAcceleratorES here is the empty in-kernel class of the fuxi lane (FuxiAdrenoUserClient.cpp,
+- * compiled into this kernel; Apple's IOGPUFamily is not loaded), declared again to derive from it.
+- * The class is named AGXAccelerator as UniXNU's is, the name Apple's sandbox profiles accept. It is
+- * published only with boot-arg pandora_gpu_metal=1: once it exists, every process that starts
+- * Metal (backboardd first) finds it and goes looking for the plugin.
++ * Metal's discovery (patch 0333): Metal.framework calls
++ * IOServiceMatching("IOAcceleratorES") - 210 times per boot - and then loads
++ * /System/Library/Extensions/<MetalPluginName>.bundle, class MetalPluginClassName.
++ * Turnip's Darwin backend, without TU_DARWIN_SERVICE, opens the same node with
++ * type 0x4147 (NTNL tunnel).
++ *
++ * The class name has to be exactly "IOAcceleratorES": IOServiceMatching() resolves
++ * through OSMetaClass::applyToInstancesOfClassName() ->
++ * sAllClassesDict->getObject(name), so it walks one metaclass's instance set and never
++ * looks at subclasses (that is why AGXAccelerator, a subclass, answered none of the
++ * 210 calls). Patch 0184 used to sit on that name via an empty fuxi-lane class; 0333
++ * renamed that one to FuxiAcceleratorES and publishes this node here instead.
++ *
++ * Published only with boot-arg pandora_gpu_metal=1. AGXAccelerator stays as the
++ * UniXNU-compatible alias but no longer has a personality, so only one node exists -
++ * two nodes would make Metal see two GPUs.
+  */
+ class IOAcceleratorES : public IOService {
+ 	OSDeclareDefaultStructors(IOAcceleratorES);
 +
 +public:
 +	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
 +	IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type, OSDictionary *properties,
 +	    IOUserClient **handler) APPLE_KEXT_OVERRIDE;
-+};
+ };
+ 
++OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
 +
-+OSDefineMetaClassAndStructors(IOAcceleratorESLegacy, IOAcceleratorES);
-+
-+/*
-+ * Queries exactly as iOS issues them. IOTaskRegistryCompatibilityMatching() adds
-+ * IOServiceNotificationUser=true to every userland match dictionary, so run both forms: if the plain
-+ * one answers and the tagged one does not, the tag itself is the filter.
-+ */
++/* The query Apple's userland issues, run from the kernel. */
 +static IOService *
 +pandora_gpu_es_query(bool userland)
 +{
-+	OSDictionary *m = IOService::serviceMatching("IOAcceleratorESLegacy");
++	OSDictionary *m = IOService::serviceMatching("IOAcceleratorES");
 +	if (m && userland) {
 +		m->setObject("IOServiceNotificationUser", kOSBooleanTrue);
 +	}
@@ -54,10 +65,20 @@ diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdr
 +	return found;
 +}
 +
-+static const char *
-+pandora_gpu_es_class(IOService *s)
++static void
++pandora_gpu_es_report(const char *when)
 +{
-+	return s ? s->getMetaClass()->getClassName() : "none";
++	IOService *plain = pandora_gpu_es_query(false);
++	IOService *uland = pandora_gpu_es_query(true);
++	IOLog("PANDORA GPU ES: %s plain %s, userland %s\n", when,
++	    plain ? plain->getMetaClass()->getClassName() : "none",
++	    uland ? uland->getMetaClass()->getClassName() : "none");
++	if (plain) {
++		plain->release();
++	}
++	if (uland) {
++		uland->release();
++	}
 +}
 +
 +static void
@@ -66,32 +87,24 @@ diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdr
 +	IOService *es = static_cast<IOService *>(arg);
 +	/*
 +	 * registerService() from inside a personality start() only queues a match job, and at 0.139 s
-+	 * the platform workloop is not dispatching yet, so the job never reaches doServiceMatch().
-+	 * Register late and synchronously instead.
++	 * the platform workloop is not dispatching yet: the job never reaches doServiceMatch(), so the
++	 * service never gets kIOServiceRegisteredState/kIOServiceMatchedState and IOServiceMatching()
++	 * answers nothing for the whole boot. Register late and synchronously instead - that runs
++	 * doServiceMatch() inline.
 +	 */
 +	IOSleep(1500);
 +	es->registerService(kIOServiceSynchronous);
-+	/* backboardd asks between 28 s and 55 s; sample across that window. */
-+	static const int gap[] = { 44000, 3000, 3000, 3000 };
-+	for (unsigned int i = 0; i < sizeof(gap) / sizeof(gap[0]); i++) {
-+		IOSleep(gap[i]);
-+		IOService *plain = pandora_gpu_es_query(false);
-+		IOService *uland = pandora_gpu_es_query(true);
-+		IOLog("PANDORA GPU ES: sample %u state %#x plane %d, plain %s, userland %s\n", i,
-+		    es->getState(), es->inPlane(gIOServicePlane),
-+		    pandora_gpu_es_class(plain), pandora_gpu_es_class(uland));
-+		if (plain) {
-+			plain->release();
-+		}
-+		if (uland) {
-+			uland->release();
-+		}
-+	}
-+	/* No release of `es` on purpose: the trait is the only reference keeping it in the registry. */
++	IOLog("PANDORA GPU ES: registered at boot+1.5 s, state %#x plane %d\n", es->getState(),
++	    es->inPlane(gIOServicePlane));
++	pandora_gpu_es_report("after register");
++	/* backboardd starts asking around 28 s; sample inside its window. */
++	IOSleep(44000);
++	pandora_gpu_es_report("at boot+45 s");
++	/* Deliberately no release: the registry holds no reference, so letting go frees the node. */
 +}
 +
 +bool
-+IOAcceleratorESLegacy::start(IOService *provider)
++IOAcceleratorES::start(IOService *provider)
 +{
 +	int metal = 0;
 +	(void)PE_parse_boot_argn("pandora_gpu_metal", &metal, sizeof(metal));
@@ -113,30 +126,26 @@ diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdr
 +}
 +
 +IOReturn
-+IOAcceleratorESLegacy::newUserClient(task_t owningTask, void *securityID, UInt32 type,
++IOAcceleratorES::newUserClient(task_t owningTask, void *securityID, UInt32 type,
 +    __unused OSDictionary *properties, IOUserClient **handler)
 +{
 +	IOLog("PANDORA GPU ES: open type 0x%x\n", type);
 +	return pandora_gpu_new_client(this, owningTask, securityID, type, handler);
 +}
- /* For bsd/dev/pandora_gpu.c: unpin an imported buffer (its BoImport descriptor). */
- extern "C" void
- pandora_gpu_release_ref(void *ref)
++
+ class AGXAccelerator : public IOAcceleratorES {
+ 	OSDeclareDefaultStructors(AGXAccelerator);
+ 
 diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
 --- a/iokit/KernelConfigTables.cpp
 +++ b/iokit/KernelConfigTables.cpp
-@@ -70,9 +70,14 @@ const char * gIOKernelConfigTables =
+@@ -70,8 +70,8 @@ const char * gIOKernelConfigTables =
      "   {"
-     "     'IOClass'         = AGXAccelerator;"
+-    "     'IOClass'         = AGXAccelerator;"
++    "     'IOClass'         = IOAcceleratorES;"
      "     'IOProviderClass' = IOResources;"
-     "     'IOMatchCategory' = AGXAccelerator;"
+-    "     'IOMatchCategory' = AGXAccelerator;"
++    "     'IOMatchCategory' = IOAcceleratorES;"
      "   },"
-+    "   {"
-+    "     'IOClass'         = IOAcceleratorESLegacy;"
-+    "     'IOProviderClass' = IOResources;"
-+    "     'IOMatchCategory' = IOAcceleratorESLegacy;"
-+    "   },"
      "   {"
      "     'IOClass'         = IOWatchdog;"
-     "     'IOProviderClass' = IOResources;"
-     "     'IOMatchCategory' = IOWatchdog;"
