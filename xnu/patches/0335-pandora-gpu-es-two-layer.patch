@@ -1,0 +1,71 @@
+Subject: [PATCH] pandora: publish AGXAccelerator under the IOAcceleratorES nub (two layers)
+
+log19: the IOAcceleratorES node is healthy the whole boot (state 0x1e, rc 6, plain and
+userland queries both hit from 1.6 s to 55.6 s) and start() is never called twice, so the
+node was not terminated.  What separates the in-kernel hit from backboardd's 0 found is the
+API: IOService::serviceMatching() asks "which class are you" (IOClass), while userland
+IOServiceMatching() sets IOProviderClass and asks "who hangs below IOAcceleratorES".  Our
+node's provider is IOResources, so the 210 queries per boot could never match.
+
+Split the personality: IOAcceleratorES stays a nub under IOResources, and AGXAccelerator is
+instantiated under it, which is what backboardd looks for.  AGXAccelerator only starts when
+its provider carries the PandoraGpuESNub property, so the personality cannot nest.
+
+diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
+--- a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
++++ b/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
+@@ -683,6 +683,7 @@
+ 	setName("NativeAdrenoGpu");
+ 	setProperty("MetalPluginName", "NativeAdrenoMetal");
+ 	setProperty("MetalPluginClassName", "NativeAdrenoMetalDevice");
++	setProperty("PandoraGpuESNub", kOSBooleanTrue);
+ 	/* Registration is deferred: see pandora_gpu_es_publish_thread(). The retain keeps it alive. */
+ 	retain();
+ 	thread_t thread;
+@@ -718,14 +719,27 @@
+ {
+ 	int metal = 0;
+ 	(void)PE_parse_boot_argn("pandora_gpu_metal", &metal, sizeof(metal));
+-	if (!metal || !IOService::start(provider)) {
++	if (!metal) {
++		return false;
++	}
++	/*
++	 * Only ever under the IOAcceleratorES node: an IOProviderClass of IOAcceleratorES matches
++	 * subclasses of it as well, so without this check an AGXAccelerator instance could itself
++	 * be the provider of the next AGXAccelerator and the personality would nest forever.
++	 */
++	if (!provider || !provider->getProperty("PandoraGpuESNub")) {
++		IOLog("PANDORA GPU ES: AGX provider has no PandoraGpuESNub, skipped\n");
++		return false;
++	}
++	if (!IOService::start(provider)) {
+ 		return false;
+ 	}
+ 	setName("NativeAdrenoGpu");
+ 	setProperty("MetalPluginName", "NativeAdrenoMetal");
+ 	setProperty("MetalPluginClassName", "NativeAdrenoMetalDevice");
+-	registerService();
+-	IOLog("PANDORA GPU UC: AGXAccelerator (IOAcceleratorES) registered, plugin NativeAdrenoMetal\n");
++	registerService(kIOServiceSynchronous);
++	IOLog("PANDORA GPU ES: AGXAccelerator published under IOAcceleratorES, state %#x rc %d\n",
++	    getState(), getRetainCount());
+ 	return true;
+ }
+ 
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -72,7 +72,12 @@ const char * gIOKernelConfigTables =
+     "     'IOClass'         = IOAcceleratorES;"
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = IOAcceleratorES;"
+     "   },"
++    "   {"
++    "     'IOClass'         = AGXAccelerator;"
++    "     'IOProviderClass' = IOAcceleratorES;"
++    "     'IOMatchCategory' = AGXAccelerator;"
++    "   },"
+     "   {"
+     "     'IOClass'         = IOWatchdog;"
+     "     'IOProviderClass' = IOResources;"
