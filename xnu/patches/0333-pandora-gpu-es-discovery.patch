@@ -10,19 +10,18 @@ diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdr
  		return kIOReturnUnsupported;
  	}
  	int c = pandora_gpu_open();
-@@ -637,6 +637,82 @@ AGXAccelerator::newUserClient(task_t owningTask, void *securityID, UInt32 type,
+@@ -637,6 +637,103 @@ AGXAccelerator::newUserClient(task_t owningTask, void *securityID, UInt32 type,
  {
  	return pandora_gpu_new_client(this, owningTask, securityID, type, handler);
  }
 +
 +/*
-+ * Metal's discovery (patch 0333). IOServiceMatching("X") is resolved by
-+ * OSMetaClass::applyToInstancesOfClassName(), which looks the name up in sAllClassesDict and walks
-+ * that one class's instance set - exact class name, no subclass walk, no provider check. So
-+ * AGXAccelerator (a subclass of IOAcceleratorES, registered at 0.139 s in log11) can never answer
-+ * the 185 IOAcceleratorES lookups backboardd makes per boot. Publish a service whose class name is
-+ * one iOS actually asks for (log11 also showed 7 IOAcceleratorESLegacy lookups) and hand out the
-+ * same AGXDeviceUserClient AGXAccelerator does. Open type 0 is Metal's own IOServiceOpen; 0x4147 is
++ * Metal's discovery (patch 0333). IOServiceMatching("X") resolves through
++ * OSMetaClass::applyToInstancesOfClassName(): it looks the name up in sAllClassesDict and walks that
++ * one class's instance set - exact class name, no subclass walk, no provider check. So AGXAccelerator
++ * (a subclass of IOAcceleratorES, registered at 0.139 s) can never answer the 211 IOAcceleratorES
++ * lookups backboardd makes per boot. Publish a service whose class name is one iOS asks for, hand out
++ * the same AGXDeviceUserClient AGXAccelerator does: type 0 is Metal's own IOServiceOpen, 0x4147 is
 + * Turnip's raw ABI.
 + */
 +class IOAcceleratorESLegacy : public IOAcceleratorES {
@@ -36,28 +35,49 @@ diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdr
 +
 +OSDefineMetaClassAndStructors(IOAcceleratorESLegacy, IOAcceleratorES);
 +
++/* The query iOS issues, run from the kernel: same dictionary, same filter bit. */
++static IOService *
++pandora_gpu_es_query(void)
++{
++	OSDictionary *m = IOService::serviceMatching("IOAcceleratorESLegacy");
++	IOService *found = m ? IOService::copyMatchingService(m) : nullptr;
++	if (m) {
++		m->release();
++	}
++	return found;
++}
++
 +static void
 +pandora_gpu_es_publish_thread(void *arg, wait_result_t)
 +{
 +	IOService *es = static_cast<IOService *>(arg);
 +	/*
-+	 * registerService() from inside a personality start() only queues a match job. At 0.139 s the
-+	 * platform workloop is not dispatching yet, so the job never reaches doServiceMatch(): the
-+	 * service keeps a __state[0] without kIOServiceRegisteredState/kIOServiceMatchedState and
-+	 * IOServiceMatching() answers nothing for the rest of the boot (log13: 211 x
-+	 * "IOAcceleratorES -> 0 found"). Register late, and synchronously, from a thread instead.
++	 * registerService() from inside a personality start() only queues a match job, and at 0.139 s
++	 * the platform workloop is not dispatching yet: the job never reaches doServiceMatch() and the
++	 * service stays without kIOServiceRegisteredState/kIOServiceMatchedState for the whole boot
++	 * (log13: 211 x "IOAcceleratorES -> 0 found"). Register late and synchronously, so
++	 * doServiceMatch() runs inline.
 +	 */
 +	IOSleep(1500);
 +	es->registerService(kIOServiceSynchronous);
-+	OSDictionary *m = IOService::serviceMatching("IOAcceleratorESLegacy");
-+	IOService *found = m ? IOService::copyMatchingService(m) : nullptr;
-+	IOLog("PANDORA GPU ES: register done, self-query -> %s\n",
-+	    found ? found->getMetaClass()->getClassName() : "none");
-+	if (m) {
-+		m->release();
++	IOService *early = pandora_gpu_es_query();
++	IOLog("PANDORA GPU ES: early state %#x plane %d, self-query -> %s\n", es->getState(),
++	    es->inPlane(gIOServicePlane),
++	    early ? early->getMetaClass()->getClassName() : "none");
++	if (early) {
++		early->release();
 +	}
-+	if (found) {
-+		found->release();
++	/*
++	 * backboardd asks at 28-55 s, so check again there: this tells apart "never registered" from
++	 * "was registered and then dropped out of the registry".
++	 */
++	IOSleep(28000);
++	IOService *late = pandora_gpu_es_query();
++	IOLog("PANDORA GPU ES: late state %#x plane %d, self-query -> %s\n", es->getState(),
++	    es->inPlane(gIOServicePlane),
++	    late ? late->getMetaClass()->getClassName() : "none");
++	if (late) {
++		late->release();
 +	}
 +	es->release();
 +}
@@ -73,6 +93,7 @@ diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdr
 +	setName("NativeAdrenoGpu");
 +	setProperty("MetalPluginName", "NativeAdrenoMetal");
 +	setProperty("MetalPluginClassName", "NativeAdrenoMetalDevice");
++	/* Registration is deferred: see pandora_gpu_es_publish_thread(). */
 +	retain();
 +	thread_t thread;
 +	if (kernel_thread_start(pandora_gpu_es_publish_thread, this, &thread) != KERN_SUCCESS) {
