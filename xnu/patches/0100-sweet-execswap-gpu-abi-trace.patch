@@ -318,7 +318,7 @@
   }
   void free() override {
    (void)clientClose();
-@@ -331,14 +389,26 @@
+@@ -331,14 +389,31 @@
   }
  };
  OSDefineMetaClassAndStructors(FuxiAdrenoUserClient,IOUserClient)
@@ -352,7 +352,7 @@
    if (!handler) return kIOReturnBadArgument;
    *handler=nullptr;
    if (type!=0x4147 && type!=0) return kIOReturnUnsupported;
-@@ -351,9 +421,12 @@
+@@ -351,9 +426,12 @@
    *handler=uc; return kIOReturnSuccess;
   }
  };
@@ -366,7 +366,7 @@
   openLock=IOLockAlloc();
   auto *service=new NativeAdrenoGpuPublished;
   if (!openLock || !service) { if (service) service->release(); return; }
-@@ -362,6 +435,16 @@
+@@ -362,6 +440,16 @@
   }
   service->setName("NativeAdrenoGpu");
   service->setProperty("NativeAdrenoABI",(uint64_t)NativeAdrenoAbiVersion,32);
