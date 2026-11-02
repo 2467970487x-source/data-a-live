@@ -1,0 +1,42 @@
+diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
+--- a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
++++ b/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
+@@ -676,6 +676,19 @@ AGXAccelerator::start(IOService *provider)
+ 	int metal = 0;
+ 	(void)PE_parse_boot_argn("pandora_gpu_metal", &metal, sizeof(metal));
+-	if (!metal || !IOService::start(provider)) {
++	if (!metal) {
++		return false;
++	}
++	/*
++	 * backboardd asks for IOServiceMatching("IOAcceleratorES"), which IOKitLib turns into
++	 * IOProviderClass=IOAcceleratorES: it wants the service whose *provider* is the nub, not the nub
++	 * itself (log19: the kernel's own serviceMatching("IOAcceleratorES") hits the nub, backboardd's
++	 * query never does). This class is that service. Refuse to nest one under another, or the
++	 * personality also matches its own instances.
++	 */
++	if (provider && provider->metaCast("AGXAccelerator")) {
++		return false;
++	}
++	if (!IOService::start(provider)) {
+ 		return false;
+ 	}
+ 	setName("NativeAdrenoGpu");
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -75,9 +75,14 @@ const char * gIOKernelConfigTables =
+     "   {"
+     "     'IOClass'         = IOAcceleratorES;"
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = IOAcceleratorES;"
+     "   },"
+     "   {"
++    "     'IOClass'         = AGXAccelerator;"
++    "     'IOProviderClass' = IOAcceleratorES;"
++    "     'IOMatchCategory' = AGXAccelerator;"
++    "   },"
++    "   {"
+     "     'IOClass'         = IOWatchdog;"
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = IOWatchdog;"
