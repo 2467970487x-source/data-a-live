@@ -1,0 +1,57 @@
+Subject: [PATCH] pandora: defer the file pack with pandora_files_at, and log refused opens
+
+Two things the last rounds could not see.
+
+pandora_files_at=MS (bsd/dev/pandora_files.c): the installer always slept a fixed 2000 ms after
+the root was mounted, so every file in the pack - including the 22 MiB NativeAdrenoMetal.bundle -
+was in place long before Metal enumerates devices at about 14 s.  Metal then instantiates
+NSPrincipalClass from the bundle, the accelerator cannot serve it, and backboardd freezes after
+its fourth frame (SWEET FB: swap 4).  With the pack deferred, the bundle only appears once the
+system is up, which is what the Trogdor port does by writing the plugin from an addon that
+launchd mounts after boot.  Default unchanged (2000).
+
+The open helper (iokit/Kernel/arm/PandoraAdrenoGpu.cpp) refused any type other than 0x4147 and
+printed nothing, so a refused IOServiceOpen looked exactly like an open that never happened -
+and the whole discovery line was argued from that silence.  Log the refusal with the caller.
+
+diff --git a/bsd/dev/pandora_files.c b/bsd/dev/pandora_files.c
+--- a/bsd/dev/pandora_files.c
++++ b/bsd/dev/pandora_files.c
+@@ -125,7 +125,23 @@
+ 	for (int i = 0; i < 600 && rootvnode == NULLVP; i++) {
+ 		pf_sleep(500);
+ 	}
+-	pf_sleep(2000);
++	/*
++	 * Patch 0336: pandora_files_at=MS defers the whole pack.  Installed late, the Metal plugin
++	 * bundle appears only after the system is up, so Metal's early device scan does not try to
++	 * instantiate a device whose accelerator cannot serve it (that scan hangs, and backboardd
++	 * freezes after its fourth frame).  Default stays 2000 ms as before.
++	 */
++	{
++		int at = 2000;
++		(void)PE_parse_boot_argn("pandora_files_at", &at, sizeof(at));
++		if (at < 0) {
++			at = 0;
++		}
++		if (at != 2000) {
++			printf("PANDORA FILES: pack deferred %d ms after root\n", at);
++		}
++		pf_sleep((unsigned)at);
++	}
+ 	uint8_t blk[4096];
+ 	uint32_t n = 0;
+ 	if (rootvnode == NULLVP || pandora_fw_read(0, blk, sizeof(blk))) {
+diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
+--- a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
++++ b/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
+@@ -548,6 +548,9 @@
+ pandora_gpu_new_client(IOService *owner, task_t owningTask, void *securityID, UInt32 type, IOUserClient **handler)
+ {
+ 	if (type != PANDORA_GPU_OPEN_TYPE && type != 0) {
++		char who[32];
++		proc_selfname(who, sizeof(who));
++		IOLog("PANDORA GPU ES: open type 0x%x refused for %s\n", type, who);
+ 		return kIOReturnUnsupported;
+ 	}
+ 	int c = pandora_gpu_open();
