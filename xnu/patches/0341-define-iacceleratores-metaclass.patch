@@ -1,0 +1,18 @@
+diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
+--- a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
++++ b/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
+@@ -610,6 +610,14 @@
+ 	OSDeclareDefaultStructors(IOAcceleratorES);
+ };
+ 
++/*
++ * Patch 0341: 0184 declares IOAcceleratorES and derives AGXAccelerator from it, but the only
++ * definition in the tree is the fuxi lane's copy in FuxiAdrenoUserClient.cpp, which does not land
++ * in the PANDORA kernel any more: the link fails with "IOAcceleratorES::gMetaClass, referenced from
++ * AGXAccelerator::MetaClass". Define the metaclass here so the accelerator can be built at all.
++ */
++OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
++
+ class AGXAccelerator : public IOAcceleratorES {
+ 	OSDeclareDefaultStructors(AGXAccelerator);
+ 
