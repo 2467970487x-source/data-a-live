@@ -1,0 +1,43 @@
+Subject: [PATCH] pandora: put the GPU table pool back to 4 MiB and 4 clients
+
+Every kernel that renders a black screen was built after 0332, and every kernel that reaches
+the lock screen was built before it: loader-gpu15.img (log29/30/31/38/41, lock screen, 10-41
+frames, 314-337 IOAcceleratorES queries from backboardd) has no "client windows taken" and no
+"table pages" string in its text segment, while k341/k343/k346/k348 all do.  Same pack, same
+boot-args, same config table (byte-identical gIOKernelConfigTables), so the personality, the
+IOAcceleratorES class and the es_* threads that were blamed in 0337 cannot be it: 0337 removed
+the personality and log43 still froze.
+
+What 0332 changes for a boot that is already at pandora_gpu=15 is the shape of the GPU's
+memory: GPU_TABLE_PAGES 1024 -> 2048 makes the level-9 table pool a single 8 MiB
+kmem_alloc_contig(KMA_PERMANENT) instead of 4 MiB, and GPU_MAX_CLIENTS 4 -> 15 grows
+gpu_clients[] and the gpu_watch() frame (last[clients][160] = 2400 bytes on that thread's
+stack).  log43/37/39/40 all stop the same way: backboardd opens SweetHIDTouch and
+SweetHIDButtons at 14.15 s and then issues no further IOKit call for 32 s, never asks for
+IOMobileFramebuffer, and the display is never brought up.
+
+Go back to 4 MiB and 4 clients to confirm that split before redesigning the pool: this is a
+bisect step, not the final shape.  A wider pool has to be introduced so that nothing a boot
+needs moves or grows.
+
+diff --git a/bsd/dev/pandora_gpu.c b/bsd/dev/pandora_gpu.c
+--- a/bsd/dev/pandora_gpu.c
++++ b/bsd/dev/pandora_gpu.c
+@@ -544,7 +544,7 @@ gpu_level3(void)
+ #define GMU_ASID          1u
+ #define GMU_SLOT          2u
+ #define GMU_TABLE_PAGES   64u
+-#define GPU_TABLE_PAGES   2048u     /* 8 MiB: the level-9 tables plus room for ~4 GiB of later 4K maps (0332: more clients) */
++#define GPU_TABLE_PAGES   1024u     /* 4 MiB: the level-9 tables plus room for ~2 GiB of later 4K maps */
+ #define GPU_INPUT_BITS    36u       /* 0219: the GPU context's addresses; room for the clients' 4 GiB windows */
+ 
+ struct gmu_buf {
+@@ -2297,7 +2297,7 @@ LCK_GRP_DECLARE(gpu_lck_grp, "pandora_gpu");
+ LCK_MTX_DECLARE(gpu_lock, &gpu_lck_grp);
+ 
+ #define GPU_MAX_BOS       4096u
+-#define GPU_MAX_CLIENTS   15u       /* 0332: the 4 GiB windows at 4..64 GiB of the 36-bit space (4 with the 32-bit layout) */
++#define GPU_MAX_CLIENTS   4u
+ #define GPU_MAX_IBS       128u      /* NativeAdrenoAbiMaxBuffers (tools/turnip/abi_128.py, 0194) */
+ struct gpu_bo {
+ 	bool used;
