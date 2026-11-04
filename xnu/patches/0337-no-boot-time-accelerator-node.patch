@@ -1,0 +1,32 @@
+Subject: [PATCH] iokit: stop instantiating the accelerator node at boot
+
+Everything from 0333 on renders a black screen, and the split is categorical, not the known
+1/3 freeze: log36/37/39/40 (k346, k343, k341) submit zero frames and backboardd never issues a
+single IOAcceleratorES query, while every 11-01 boot (log29, log30, log31, log38) submits 10-41
+frames and 314-323 queries. Same pack, same disk, same boot-args; only the kernel differed.
+
+The one thing 0333/0335 add to boot itself is a personality: IOClass=IOAcceleratorES under
+IOResources. Its start() returns false whenever pandora_gpu_metal is unset, so the match job
+terminates the node it just created, and from that point backboardd's main thread stops making
+progress (log37: HID open at 14.13 s, then nothing; log35: the main thread sits on one address
+from 15.195 s to 72 s), so it never opens the framebuffer and never starts Metal.
+
+Take the node out of the boot path: keep 0184's personality, which 11-01 tolerated, and leave
+the two-layer publication to a later patch that creates the node from a kernel thread after boot
+instead of inside doServiceMatch().
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -72,11 +72,6 @@ const char * gIOKernelConfigTables =
+-    "     'IOClass'         = IOAcceleratorES;"
++    "     'IOClass'         = AGXAccelerator;"
+     "     'IOProviderClass' = IOResources;"
+-    "     'IOMatchCategory' = IOAcceleratorES;"
+-    "   },"
+-    "   {"
+-    "     'IOClass'         = AGXAccelerator;"
+-    "     'IOProviderClass' = IOAcceleratorES;"
+     "     'IOMatchCategory' = AGXAccelerator;"
+     "   },"
+     "   {"
+     "     'IOClass'         = IOWatchdog;"
