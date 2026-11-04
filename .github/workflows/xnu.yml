@@ -43,7 +43,7 @@ jobs:
           git -C dxb fetch -q --depth 1 "$DXB_REPO" "$DXB_SHA"
           git -C dxb checkout -q FETCH_HEAD
           # 12.5-14.3 use the top-level patches dir; ours go next to blacktop's
-          cp xnu/patches/*.patch xnu/patches/*.sh dxb/patches/
+          cp xnu/patches/*.patch xnu/patches/*.sh xnu/patches/*.tar.gz dxb/patches/ 2>/dev/null || cp xnu/patches/*.patch xnu/patches/*.sh dxb/patches/
           # The staging scripts only run for SWEET; FUXI and PANDORA use the same staged sources
           sed -i '' 's/\[\[ "\${MACHINE_CONFIG:-}" == SWEET \]\]/[[ "${MACHINE_CONFIG:-}" =~ ^(SWEET|FUXI|PANDORA)$ ]]/' dxb/patches/*.sh
           grep -h 'MACHINE_CONFIG:-' dxb/patches/*.sh
