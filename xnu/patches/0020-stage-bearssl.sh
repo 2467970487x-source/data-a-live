@@ -6,11 +6,20 @@ set -euo pipefail
 bearssl_sha=7bea48e5e850ab4cafbe68d3765cdaba13a86d6f
 bearssl_tmp=$(mktemp -d)
 trap 'rm -rf "$bearssl_tmp"' EXIT
-git init -q "$bearssl_tmp"
-git -C "$bearssl_tmp" fetch -q --depth 1 \
-    https://www.bearssl.org/git/BearSSL "$bearssl_sha"
-git -C "$bearssl_tmp" checkout -q FETCH_HEAD
-[[ "$(git -C "$bearssl_tmp" rev-parse HEAD)" == "$bearssl_sha" ]]
+here=$(cd "$(dirname "$0")" && pwd)
+if [ -f "$here/bearssl-pinned.tar.gz" ]; then
+    # The same tree the pinned commit stages, kept in the repository: bearssl.org answers 502 often
+    # enough that a build cannot depend on it (runs 41820095508, 41820357079, 41820725469 all died
+    # there before compiling anything).
+    tar xzf "$here/bearssl-pinned.tar.gz" -C "$bearssl_tmp"
+    echo "Using the in-repo BearSSL snapshot ($bearssl_sha)"
+else
+    git init -q "$bearssl_tmp"
+    git -C "$bearssl_tmp" fetch -q --depth 1 \
+        https://www.bearssl.org/git/BearSSL "$bearssl_sha"
+    git -C "$bearssl_tmp" checkout -q FETCH_HEAD
+    [[ "$(git -C "$bearssl_tmp" rev-parse HEAD)" == "$bearssl_sha" ]]
+fi
 python3 - "$bearssl_tmp" <<'PY'
 from pathlib import Path
 import shutil
