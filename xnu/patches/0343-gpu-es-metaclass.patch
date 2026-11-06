@@ -1,32 +1,21 @@
-Subject: [PATCH] pandora: define IOAcceleratorES's meta class, the one line 0333 was carrying
+Subject: [PATCH] pandora: define IOAcceleratorES's meta class, the line 0333 was carrying
 
-0184 declares the class with OSDeclareDefaultStructors only, which declares the
-meta class but never defines it.  The definition lived in 0333, together with a
-registry sampler (a publishing thread that registers synchronously after 1.5 s
-and then queries the service plane every 2 s between 44 s and 56 s).
-
-k354 dropped 0333 and the kernel stopped linking:
-
-  "IOAcceleratorES::gMetaClass", referenced from:
-      AGXAccelerator::MetaClass::MetaClass() in PandoraAdrenoGpu.cpo
-  "IOAcceleratorES::IOAcceleratorES(OSMetaClass const*)", referenced from: ...
-
-So keep the definition and leave the sampler out: with the class defined by one
-line, AGXAccelerator is the same 0184 personality that reached the lock screen in
-log53/log56, and 0340's guard change is the only behavioural difference.
+0184 declares the class with OSDeclareDefaultStructors only, which declares the meta
+class but never defines it.  The definition lived in 0333, next to a registry sampler.
+k354 dropped 0333 and the kernel stopped linking (IOAcceleratorES::gMetaClass undefined
+from AGXAccelerator::MetaClass::MetaClass).  Keep the definition, leave the sampler out.
 
 diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
 --- a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
 +++ b/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
-@@ -597,6 +597,12 @@
+@@ -594,6 +594,12 @@
  class IOAcceleratorES : public IOService {
  	OSDeclareDefaultStructors(IOAcceleratorES);
  };
  
 +/*
 + * 0343: OSDeclareDefaultStructors leaves gMetaClass undefined, so AGXAccelerator cannot link
-+ * without this.  0333 used to carry the line, along with a registry sampler that is not wanted
-+ * here: the node published by 0184 is the one backboardd already matches and opens.
++ * without this one line.  0333 carried it next to a registry sampler that is not wanted here.
 + */
 +OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
 +
