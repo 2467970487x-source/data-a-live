@@ -1,0 +1,30 @@
+Subject: [PATCH] pandora: let Metal open the accelerator with its own type
+
+backboardd opens AGXAccelerator with type 1 and pandora_gpu_new_client answers
+0xe00002c7, because it only accepts Turnip's 0x4147.  That refusal is why the
+compositor never gets a Metal device: log62 (the kernel that does reach the lock
+screen) leaves SpringBoard frozen on three threads with only the logo presented.
+
+0345 aimed at PandoraAdrenoGpu::newUserClient, but 0184 had already moved that
+body into the static helper pandora_gpu_new_client, so the hunk missed and the
+build went out unchanged (no 'open type %#x refused' in the binary).  Anchor on
+the helper, and log whatever is still refused so the next console can be read.
+
+diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
+--- a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
++++ b/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
+@@ -348,8 +348,13 @@
+ /* The open both services share: type 0x4147 makes an AGXDeviceUserClient attached to OWNER. */
+ static IOReturn
+ pandora_gpu_new_client(IOService *owner, task_t owningTask, void *securityID, UInt32 type, IOUserClient **handler)
+ {
+-	if (type != PANDORA_GPU_OPEN_TYPE) {
++	/*
++	 * 0346: Metal opens the accelerator with type 1, Turnip with 0x4147. Both end up in this
++	 * same AGXDeviceUserClient; accept the small numbers Metal uses and log the rest.
++	 */
++	if (type != PANDORA_GPU_OPEN_TYPE && type > 8) {
++		IOLog("PANDORA GPU UC: open type %#x refused\n", type);
+ 		return kIOReturnUnsupported;
+ 	}
+ 	int c = pandora_gpu_open();
