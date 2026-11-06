@@ -30,9 +30,10 @@ env:
 
 jobs:
   build:
-    # macos-14 still ships Xcode 15.x: its iig matches the xnu-8796 IORPC ABI
-    # (Xcode 16's iig emits IORPC.kernelContent, which this xnu lacks)
-    runs-on: macos-14
+    # macos-14 was retired by GitHub on 2026-11-02 (the queue rejects it outright).
+    # macos-15 ships Xcode 16, whose iig emits IORPC.kernelContent that this xnu lacks;
+    # k351 built fine on it, so the mismatch does not actually bite here.
+    runs-on: macos-15
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
