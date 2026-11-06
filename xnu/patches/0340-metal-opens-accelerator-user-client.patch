@@ -1,0 +1,18 @@
+diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
+--- a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
++++ b/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
+@@ -547,7 +547,13 @@
+ static IOReturn
+ pandora_gpu_new_client(IOService *owner, task_t owningTask, void *securityID, UInt32 type, IOUserClient **handler)
+ {
+-	if (type != PANDORA_GPU_OPEN_TYPE) {
++	/*
++	 * Patch 0340: Metal opens the accelerator with type 1 (log49: "open AGXAccelerator type 1 ->
++	 * 0xe00002c7"), not with Turnip's 0x4147. Both are the same client here; accept the small
++	 * numbers Metal uses and keep the refusal logged so a wrong type is visible in the next log.
++	 */
++	if (type != PANDORA_GPU_OPEN_TYPE && type > 8) {
++		IOLog("PANDORA GPU UC: open type %#x refused\n", type);
+ 		return kIOReturnUnsupported;
+ 	}
+ 	int c = pandora_gpu_open();
