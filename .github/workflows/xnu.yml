@@ -30,9 +30,11 @@ env:
 
 jobs:
   build:
-    # macos-14 still ships Xcode 15.x: its iig matches the xnu-8796 IORPC ABI
-    # (Xcode 16's iig emits IORPC.kernelContent, which this xnu lacks)
-    runs-on: macos-14
+    # macos-14 (x64) was retired by GitHub on 2026-11-02.  Its x64 replacement is
+    # macos-15-intel; the plain macos-15 label is arm64 and its free-tier queue keeps
+    # timing out at 15 minutes ("not acquired by Runner of type hosted"), which killed
+    # two k352 builds.  Xcode 16 is fine: k351 built and linked on it.
+    runs-on: macos-15-intel
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -148,3 +150,4 @@ jobs:
           name: xnu-kernel
           path: out/
           if-no-files-found: warn
+# gpu-es branch: dispatched by hand to build the 0333 patch.

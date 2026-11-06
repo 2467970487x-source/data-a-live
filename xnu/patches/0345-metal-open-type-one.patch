@@ -1,0 +1,26 @@
+Subject: [PATCH] pandora: let Metal open the accelerator with its own type
+
+backboardd opens AGXAccelerator with type 1 and PandoraAdrenoGpu::newUserClient
+answers 0xe00002c7, because it only accepts Turnip's 0x4147.  That refusal is
+why the compositor never gets a Metal device and the screen tears.
+
+Same change as 0344, written against this tree: here the check still sits in
+PandoraAdrenoGpu::newUserClient and there is no 0333 to accept type 0 first.
+
+diff --git a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp b/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
+--- a/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
++++ b/iokit/Kernel/arm/PandoraAdrenoGpu.cpp
+@@ -548,7 +548,12 @@
+ PandoraAdrenoGpu::newUserClient(task_t owningTask, void *securityID, UInt32 type,
+     __unused OSDictionary *properties, IOUserClient **handler)
+ {
+-	if (type != PANDORA_GPU_OPEN_TYPE) {
++	/*
++	 * Metal opens the accelerator with type 1, Turnip with 0x4147. Both are the same client;
++	 * accept the small numbers Metal uses and keep the refusal logged.
++	 */
++	if (type != PANDORA_GPU_OPEN_TYPE && type > 8) {
++		IOLog("PANDORA GPU UC: open type %#x refused\n", type);
+ 		return kIOReturnUnsupported;
+ 	}
+ 	int c = pandora_gpu_open();
