@@ -9030,7 +9030,7 @@ new file mode 100644
 +            !strcmp(cls, "IONetworkStack") || !strcmp(cls, "IO80211Interface")) {
 +            OSObject *name = service->getProperty("IOInterfaceName");
 +            IOLog("NEZHA WIFI: registry %s (%s) interface %s busy %u\n", service->getName(), cls,
-+                name && OSDynamicCast(OSString, name) ? ((OSString *)name)->getCString() : "-",
++                name && OSDynamicCast(OSString, name) ? ((OSString *)name)->getCStringNoCopy() : "-",
 +                (unsigned)service->getBusyState());
 +            found++;
 +        }
