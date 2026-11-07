@@ -1,0 +1,16 @@
+name: probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: uname -a
+  macos:
+    runs-on: macos-14
+    timeout-minutes: 5
+    steps:
+      - run: sw_vers
