@@ -2,7 +2,7 @@ diff --git a/bsd/dev/pandora_wifi.c b/bsd/dev/pandora_wifi.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/pandora_wifi.c
-@@ -0,0 +1,1802 @@
+@@ -0,0 +1,1831 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* Nezha/SM8850 Peach: board power, CESTA v3, PCIe0 and isolated firmware DMA.
 + * Register sequences follow Qualcomm's pci-msm.c, crm-v2.c, clk-rpmh.c and
@@ -124,6 +124,14 @@ new file mode 100644
 +#define WIFI_MSI_OFFSET 0x808000u
 +static uint64_t wifi_arena_iova = WIFI_IOVA;
 +static unsigned wifi_recoveries;
++/* A firmware restart used to end with "manual join required" and stay there:
++ * log95 has the link dropping at 670 s (wifid was killed, the driver saw -4)
++ * and the phone never returned to laoshi again in that session. The pack that
++ * carried the credentials is still there, so the worker re-joins by itself
++ * after a bounded pause, and a working link refills the budget. */
++#define WIFI_AUTO_JOINS 6u
++static unsigned wifi_auto_joins;
++static uint64_t wifi_rejoin_at;
 +#define WIFI_TRY(expr) do { int err_ = (expr); if (err_) return err_; } while (0)
 +static int wifi_dma_health(void);
 +
@@ -1535,7 +1543,11 @@ new file mode 100644
 +    wifi_net_state = PeachNetReady;
 +    peach_net_status(&wifi_wmi, wifi_net_state, error);
 +    wifi_step = "awaiting explicit network selection";
-+    printf("NEZHA WIFI: pre-key connection retired; manual retry available, old DMA retained\n");
++    /* A dropped link is the same situation as a restarted firmware: the pack
++     * still holds the operator's network, so ask for it again rather than
++     * leaving the interface idle until somebody taps Settings. */
++    if (wifi_auto_joins < WIFI_AUTO_JOINS) wifi_rejoin_at = wifi_now(NULL) + 2000000ull;
++    printf("NEZHA WIFI: pre-key connection retired; re-join in 2 s, old DMA retained\n");
 +    return 0;
 +}
 +
@@ -1601,7 +1613,8 @@ new file mode 100644
 +        if (!err) {
 +            wifi_net_state = PeachNetReady;
 +            peach_net_status(&wifi_wmi, wifi_net_state, 0);
-+            printf("NEZHA WIFI: firmware recovered; en0 retained, scan ready, manual join required\n");
++            printf("NEZHA WIFI: firmware recovered; en0 retained, re-joining the pack's network\n");
++            if (wifi_auto_joins < WIFI_AUTO_JOINS) wifi_rejoin_at = wifi_now(NULL) + 2000000ull;
 +            return 0;
 +        }
 +        /* A failure during restarted bring-up must not bypass the remaining
@@ -1749,6 +1762,7 @@ new file mode 100644
 +        if (!err && wifi_tx.authorized) {
 +            if (!err && wifi_net_state != PeachNetOnline) {
 +                wifi_net_state = PeachNetOnline;
++                wifi_auto_joins = 0; /* a working link refills the re-join budget */
 +                peach_net_status(&wifi_wmi, wifi_net_state, 0);
 +                printf("NEZHA WIFI: association/security complete; en0 link up, IP configuration pending\n");
 +            }
@@ -1758,6 +1772,21 @@ new file mode 100644
 +            peach_net_status(&wifi_wmi, wifi_net_state, 0);
 +        }
 +        if (err && wifi_net_attached) err = wifi_firmware_recover(err);
++        if (!err && wifi_rejoin_at && wifi_net_attached && !wifi_tx.bound &&
++            wifi_now(NULL) >= wifi_rejoin_at) {
++            wifi_rejoin_at = 0;
++            if (wifi_auto_joins < WIFI_AUTO_JOINS) {
++                printf("NEZHA WIFI: automatic re-join %u/%u after recovery\n",
++                    ++wifi_auto_joins, WIFI_AUTO_JOINS);
++                int join_err = wifi_auto_join();
++                if (join_err) {
++                    printf("NEZHA WIFI: automatic re-join refused %d, retrying\n", join_err);
++                    wifi_rejoin_at = wifi_now(NULL) + 2000000ull;
++                }
++            } else {
++                printf("NEZHA WIFI: automatic re-join budget spent; manual selection required\n");
++            }
++        }
 +        if (!err) wifi_sleep(NULL, wifi_tx.bound ? 1000 : 5000);
 +    }
 +    printf("NEZHA WIFI: failure station/RSN/action %u/%u/%u WMI event %#x\n",
@@ -2626,7 +2655,7 @@ diff --git a/bsd/dev/qcom/PeachApple80211.c b/bsd/dev/qcom/PeachApple80211.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/qcom/PeachApple80211.c
-@@ -0,0 +1,346 @@
+@@ -0,0 +1,355 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* iOS 16 Apple80211 ioctl/event ABI, as recorded in HackiOS redwood's
 + * redwood_apple80211.c. Only implemented Peach operations/capabilities are
@@ -2925,10 +2954,12 @@ new file mode 100644
 +    return EOPNOTSUPP;
 +}
 +/* Every request wifid makes arrives here. Nothing else in this kernel can tell
-+ * whether it ever found the interface, so the first few dozen calls are worth
-+ * their lines: if none appear, wifid never bound and the toggle is dead above
-+ * us; if they do, the type and result say exactly which step it refused. */
-+static unsigned apple_calls;
++ * whether it ever found the interface, so the first request of each
++ * (command,type) pair is worth its line: the 40-call window used before was
++ * exhausted during the very first handshake, which left the switch/re-join
++ * phase of log95 with no record of what wifid asked for when it aborted. */
++static struct { unsigned char command; unsigned char type; } apple_seen[128];
++static unsigned apple_seen_count;
 +static int apple_ioctl(u_long command, void *data)
 +{
 +    if (command != APPLE_SET && command != APPLE_GET) return EOPNOTSUPP;
@@ -2944,9 +2975,16 @@ new file mode 100644
 +{
 +    int err = apple_ioctl(command, data);
 +    AppleRequest *r = data;
-+    if (r && apple_calls < 40) {
-+        apple_calls++;
-+        printf("NEZHA WIFI: a80211 %s type %d length %u -> %d\n",
++    if (!r || (command != APPLE_SET && command != APPLE_GET)) return err;
++    unsigned i, room = sizeof(apple_seen) / sizeof(apple_seen[0]);
++    for (i = 0; i < apple_seen_count; i++)
++        if (apple_seen[i].command == (unsigned char)command &&
++            apple_seen[i].type == (unsigned char)r->type) break;
++    if (i == apple_seen_count && apple_seen_count < room) {
++        apple_seen[i].command = (unsigned char)command;
++        apple_seen[i].type = (unsigned char)r->type;
++        apple_seen_count++;
++        printf("NEZHA WIFI: a80211 first %s type %u length %u -> %d\n",
 +            command == APPLE_SET ? "set" : "get", r->type, r->length, err);
 +    }
 +    return err;
@@ -7348,7 +7386,7 @@ diff --git a/bsd/dev/qcom/PeachWmi.c b/bsd/dev/qcom/PeachWmi.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/qcom/PeachWmi.c
-@@ -0,0 +1,1291 @@
+@@ -0,0 +1,1293 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* Minimal single-station WMI initialization. Wire offsets/tags are from
 + * fw-api/fw/{wmi.h,wmi_unified.h,wmi_tlv_defs.h,wmi_services.h,wlan_defs.h}
@@ -8234,11 +8272,13 @@ new file mode 100644
 +    w->scan_id = 0xa000 | (sequence ? sequence : 1); w->scan_requestor = 0xa001;
 +    p32(p + 4, w->scan_id); p32(p + 8, w->scan_requestor);
 +    p32(p + 16, 1); p32(p + 20, 0x7b); /* low priority, channel/start/completion/failures */
-+    /* 250 ms per channel, not 120: log88 shows the whole 26-channel sweep
-+     * finishing in ~1.5 s, so the firmware was cutting dwell to about 58 ms and
-+     * a passive 5 GHz channel never heard a full beacon interval. 26 x 250 ms
-+     * stays well inside the 20 s completion wait below. */
-+    p32(p + 24, 250); p32(p + 28, 250); /* active/passive dwell in ms */
++    /* 120 ms per channel: log88 shows the firmware cutting a 250 ms request to
++     * about 58 ms, which is shorter than a 100 ms beacon interval and left a
++     * passive 5 GHz channel deaf; 120 ms hears at least one full beacon and
++     * still finishes the 26-channel sweep in about 3 s. The previous 250 ms
++     * took 6.5 s, and Settings made the operator wait through a whole sweep
++     * before it could show a password field (log95: every tap stalled). */
++    p32(p + 24, 120); p32(p + 28, 120); /* active/passive dwell in ms */
 +    p32(p + 48, 25); p32(p + 52, 15000);
 +    p32(p + 60, 0x21 | (w->scan_id == 0xa001 ? 0x10 : 0));
 +    /* PASSIVE + FILTER_PROBE_REQ; request channel counters on the first scan. */
