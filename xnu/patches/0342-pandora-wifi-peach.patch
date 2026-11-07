@@ -2,7 +2,7 @@ diff --git a/bsd/dev/pandora_wifi.c b/bsd/dev/pandora_wifi.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/pandora_wifi.c
-@@ -0,0 +1,1756 @@
+@@ -0,0 +1,1777 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* Nezha/SM8850 Peach: board power, CESTA v3, PCIe0 and isolated firmware DMA.
 + * Register sequences follow Qualcomm's pci-msm.c, crm-v2.c, clk-rpmh.c and
@@ -1358,6 +1358,17 @@ new file mode 100644
 +    }
 +    printf("NEZHA WIFI: passive scan completed with %u BSS; awaiting explicit network selection\n",
 +        wifi_wmi.bss_count);
++    /* List what the sweep actually kept: the SSID, band and RSSI of each entry
++     * are the only way to tell "the AP was never heard" from "it was heard and
++     * then dropped by the parser". log88 had 13 BSS and none of them was
++     * laoshi_5G, with no record of what those 13 were. */
++    for (unsigned i = 0; i < wifi_wmi.bss_count; i++) {
++        const PeachWmiBss *b = &wifi_wmi.bss[i];
++        printf("NEZHA WIFI: BSS %u %02x:%02x:%02x:%02x:%02x:%02x %u MHz RSSI %d cap %#x ie %u%s ssid %.*s\n",
++            i, b->bssid[0], b->bssid[1], b->bssid[2], b->bssid[3], b->bssid[4], b->bssid[5],
++            b->frequency, b->rssi, b->capability, b->ie_bytes,
++            b->ies_truncated ? " truncated" : "", b->ssid_bytes, b->ssid);
++    }
 +    return 0;
 +}
 +
@@ -1684,9 +1695,19 @@ new file mode 100644
 +        peach_net_status(&wifi_wmi, wifi_net_state, wifi_wmi.scan_done ? 0 : EAGAIN);
 +        wifi_step = "BSD/Apple80211 interface discovery";
 +        err = peach_net_attach(wifi_wmi.mac);
-+        if (!err) wifi_net_attached = 1;
++        if (err) {
++            /* ifnet_attach already made en0 inside that call, and both the join
++             * and the data path only need the BSD half. A registry node that
++             * could not be published (no IONetworkingFamily in this kernel)
++             * must not throw away a working link and a completed scan the way
++             * the old EOPNOTSUPP path did in log87. */
++            printf("NEZHA WIFI: registry publish failed %d; keeping the BSD interface\n", err);
++            err = 0;
++        } else {
++            wifi_net_attached = 1;
++        }
 +    }
-+    if (!err && wifi_net_attached) {
++    if (!err) {
 +        wifi_step = "auto join from the pack";
 +        err = wifi_auto_join();
 +    }
@@ -1763,7 +1784,7 @@ diff --git a/bsd/dev/pandora_wifi_deps.c b/bsd/dev/pandora_wifi_deps.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/pandora_wifi_deps.c
-@@ -0,0 +1,600 @@
+@@ -0,0 +1,590 @@
 +/* SPDX-License-Identifier: MIT */
 +/*
 + * Host-side dependencies of the Peach (WCN7860 / cnss-peach) Wi-Fi driver.
@@ -2345,25 +2366,15 @@ new file mode 100644
 +}
 +
 +/*
-+ * PeachNet.c asks for the interface to be published once the firmware is up.
-+ * Publishing into the Apple80211 world is PeachWLAN.cpp's job, and that needs
-+ * the IO80211 kext (IO80211Controller derives from IONetworkController, which
-+ * the kernel does not contain). Without it wifid cannot see the interface and
-+ * the Settings switch stays dead, but the BSD half is already up: ifnet_attach
-+ * registered en0 as a plain ethernet interface before this call. Reporting
-+ * EOPNOTSUPP here made the connection worker tear the whole ladder down and
-+ * assert PERST, which threw away a working link and a completed scan (log87:
-+ * phase 16 stopped with 102 right after 13 BSS). Keep the interface and say
-+ * plainly what is missing instead.
++ * peach_wlan_publish now lives in iokit/Kernel/arm/PeachWLAN.cpp, which the
++ * iokit build list compiles: it publishes the property-only IO80211Controller /
++ * IONetworkInterface pair that wifid and configd look for, plus IONetworkStack.
++ * The stub that used to sit here returned EOPNOTSUPP, and because PeachNet
++ * propagates that through peach_net_attach the connection worker tore the link
++ * down and asserted PERST right after a completed scan (log87 phase 16, 102).
++ * Keeping a second definition here would collide with the real one at link
++ * time, so the kernel gets exactly one implementation.
 + */
-+int
-+peach_wlan_publish(const char *name, const unsigned char *mac)
-+{
-+	printf("PANDORA WIFI: interface %s up as plain ethernet; no IO80211 kext, so wifid and the Settings switch cannot see it\n",
-+	    name ? name : "?");
-+	(void)mac;
-+	return 0;
-+}
 diff --git a/bsd/dev/qcom/NezhaPcieData.h b/bsd/dev/qcom/NezhaPcieData.h
 new file mode 100644
 --- /dev/null
@@ -7296,7 +7307,7 @@ diff --git a/bsd/dev/qcom/PeachWmi.c b/bsd/dev/qcom/PeachWmi.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/qcom/PeachWmi.c
-@@ -0,0 +1,1280 @@
+@@ -0,0 +1,1291 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* Minimal single-station WMI initialization. Wire offsets/tags are from
 + * fw-api/fw/{wmi.h,wmi_unified.h,wmi_tlv_defs.h,wmi_services.h,wlan_defs.h}
@@ -7598,9 +7609,8 @@ new file mode 100644
 +    if (n - off < 4 || u32(p + off) >> 16 != 17 ||
 +        bytes > (u32(p + off) & 0xffff)) { bad(w); return; }
 +    static unsigned reported;
-+    if (reported < 3) {
++    if (reported < 48) {
 +        reported++;
-+        report(w, "WMI RX mgmt status/pdev", u32(p + 24), u32(p + 64));
 +        report(w, "WMI RX mgmt frequency/bytes", frequency, bytes);
 +    }
 +    if (u32(p + 24) || u32(p + 64) != w->radio.pdev || bytes < 24) return;
@@ -7636,10 +7646,18 @@ new file mode 100644
 +    const unsigned char *ssid = NULL;
 +    unsigned ssid_bytes = 0, dtim_period = 0;
 +    for (size_t pos = 36; pos < bytes;) {
-+        if (bytes - pos < 2 || frame[pos + 1] > bytes - pos - 2) return;
++        /* A management frame can arrive cut short: the WMI event reports the
++         * length the firmware kept. A 5 GHz beacon carrying HE/VHT elements is
++         * long enough to lose its tail, and treating that as malformed threw the
++         * whole AP away (log88: 13 BSS, all 2.4 GHz, not one 5 GHz beacon kept,
++         * although laoshi_5G sits at 5220 MHz and -32 dBm). The SSID and DTIM
++         * that did arrive are enough to list and join it, so a truncated
++         * trailing element ends the walk instead of discarding the frame. */
++        if (bytes - pos < 2) break;
 +        unsigned size = frame[pos + 1];
++        if (size > bytes - pos - 2) break;
 +        if (!frame[pos]) {
-+            if (ssid || size > 32) return;
++            if (ssid || size > 32) break;
 +            ssid = frame + pos + 2; ssid_bytes = size;
 +        }
 +        if (frame[pos] == 5 && size >= 4) dtim_period = frame[pos + 3];
@@ -8175,7 +8193,11 @@ new file mode 100644
 +    w->scan_id = 0xa000 | (sequence ? sequence : 1); w->scan_requestor = 0xa001;
 +    p32(p + 4, w->scan_id); p32(p + 8, w->scan_requestor);
 +    p32(p + 16, 1); p32(p + 20, 0x7b); /* low priority, channel/start/completion/failures */
-+    p32(p + 24, 120); p32(p + 28, 120); /* passive dwell in ms */
++    /* 250 ms per channel, not 120: log88 shows the whole 26-channel sweep
++     * finishing in ~1.5 s, so the firmware was cutting dwell to about 58 ms and
++     * a passive 5 GHz channel never heard a full beacon interval. 26 x 250 ms
++     * stays well inside the 20 s completion wait below. */
++    p32(p + 24, 250); p32(p + 28, 250); /* active/passive dwell in ms */
 +    p32(p + 48, 25); p32(p + 52, 15000);
 +    p32(p + 60, 0x21 | (w->scan_id == 0xa001 ? 0x10 : 0));
 +    /* PASSIVE + FILTER_PROBE_REQ; request channel counters on the first scan. */
@@ -8753,7 +8775,7 @@ diff --git a/iokit/Kernel/arm/PeachWLAN.cpp b/iokit/Kernel/arm/PeachWLAN.cpp
 new file mode 100644
 --- /dev/null
 +++ b/iokit/Kernel/arm/PeachWLAN.cpp
-@@ -0,0 +1,160 @@
+@@ -0,0 +1,167 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* IO80211.framework's ioctl fallback and SystemConfiguration discovery,
 + * following HackiOS RedwoodWLAN's registry contract. The data interface
@@ -8772,8 +8794,14 @@ new file mode 100644
 +#include <pexpert/pexpert.h>
 +#include <sys/proc.h>
 +
-+/* The existing Nezha identity service defines this base in
-+ * SweetPlatformExpert.cpp. Keep one metaclass definition in the kernel. */
++/* These three classes are ours, named as IO80211Family and IONetworkingFamily name
++ * theirs: neither has anything but properties, because wifid and configd find the
++ * interface through the registry class name and properties, not through a C++
++ * interface. Inheriting the real IONetworkController would drag in
++ * IONetworkingFamily.kext, which is a user-space kext this kernel does not contain;
++ * the previous omission of the IONetworkController metaclass below was exactly what
++ * kept this file out of the kernel link (link87: "no IO80211 kext to publish it").
++ * HackiOS RedwoodWLAN and ios-fuxi FuxiWLAN publish the same property-only shape. */
 +class IONetworkController : public IOService {
 +    OSDeclareDefaultStructors(IONetworkController);
 +};
@@ -8783,6 +8811,7 @@ new file mode 100644
 +class IONetworkInterface : public IOService {
 +    OSDeclareDefaultStructors(IONetworkInterface);
 +};
++OSDefineMetaClassAndStructors(IONetworkController, IOService);
 +OSDefineMetaClassAndStructors(IO80211Controller, IONetworkController);
 +OSDefineMetaClassAndStructors(IONetworkInterface, IOService);
 +
@@ -8937,6 +8966,14 @@ diff --git a/bsd/conf/files b/bsd/conf/files
 +bsd/dev/qcom/PeachWlfw.c		standard
 +bsd/dev/qcom/PeachWmi.c			standard
  bsd/dev/qcom/QcomSmem.c			standard
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -20,3 +20,4 @@
+ iokit/Kernel/arm/PandoraAudio.cpp                                optional iokitcpp
+ iokit/Kernel/arm/SweetGIC.cpp                                    optional iokitcpp
++iokit/Kernel/arm/PeachWLAN.cpp                                optional iokitcpp
+ iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
