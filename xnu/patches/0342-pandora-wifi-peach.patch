@@ -1625,7 +1625,7 @@ diff --git a/bsd/dev/pandora_wifi_deps.c b/bsd/dev/pandora_wifi_deps.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/pandora_wifi_deps.c
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,101 @@
 +/* SPDX-License-Identifier: MIT */
 +/*
 + * Host-side dependencies of the Peach (WCN7860 / cnss-peach) Wi-Fi driver.
@@ -1710,6 +1710,22 @@ new file mode 100644
 +	printf("PANDORA WIFI: firmware %s read %llu+%zu (no container reader yet)\n",
 +	    name ? name : "?", (unsigned long long)off, n);
 +	return ENOSYS;
++}
++
++/*
++ * PeachNet.c asks for the interface to be published once the firmware is up.
++ * Publishing is PeachWLAN.cpp's job, and that belongs to the IO80211 kext
++ * (IO80211Controller derives from IONetworkController, which the kernel does
++ * not contain). Until that kext exists there is nothing to publish, so this
++ * reports the interface and refuses in the same way Nezha's non-kext build did.
++ */
++int
++peach_wlan_publish(const char *name, const unsigned char *mac)
++{
++	printf("PANDORA WIFI: interface %s ready, no IO80211 kext to publish it\n",
++	    name ? name : "?");
++	(void)mac;
++	return EOPNOTSUPP;
 +}
 diff --git a/bsd/dev/qcom/NezhaPcieData.h b/bsd/dev/qcom/NezhaPcieData.h
 new file mode 100644
