@@ -2,7 +2,7 @@ diff --git a/bsd/dev/pandora_wifi.c b/bsd/dev/pandora_wifi.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/pandora_wifi.c
-@@ -0,0 +1,1777 @@
+@@ -0,0 +1,1802 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* Nezha/SM8850 Peach: board power, CESTA v3, PCIe0 and isolated firmware DMA.
 + * Register sequences follow Qualcomm's pci-msm.c, crm-v2.c, clk-rpmh.c and
@@ -1669,10 +1669,35 @@ new file mode 100644
 +    return 0;
 +}
 +
++/* The registry nodes wifid matches on carry properties only, so they do not
++ * have to wait for the ladder: publish them before the delay, while the system
++ * is still bringing launchd up, and wifid cannot miss them the way it may have
++ * at 33.7 s in log89. The MAC comes from the same /chosen property the mission
++ * stage hands to the firmware. */
++extern int peach_wlan_publish_nodes(const unsigned char *);
++static void
++wifi_publish_nodes_early(void)
++{
++    DTEntry chosen;
++    const void *value = NULL;
++    unsigned bytes = 0;
++    if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
++        SecureDTGetProperty(chosen, "nezha-wifi-mac", &value, &bytes) != kSuccess ||
++        bytes != 6) {
++        printf("NEZHA WIFI: no nezha-wifi-mac in /chosen; registry nodes wait for the ladder\n");
++        return;
++    }
++    int err = peach_wlan_publish_nodes(value);
++    printf("NEZHA WIFI: early registry publish -> %d (mac %02x:%02x:%02x:%02x:%02x:%02x)\n", err,
++        ((const unsigned char *)value)[0], ((const unsigned char *)value)[1],
++        ((const unsigned char *)value)[2], ((const unsigned char *)value)[3],
++        ((const unsigned char *)value)[4], ((const unsigned char *)value)[5]);
++}
 +static void
 +wifi_thread(void *unused, wait_result_t result)
 +{
 +    (void)unused; (void)result;
++    wifi_publish_nodes_early();
 +    wifi_sleep(NULL, wifi_delay * 1000000);
 +    wifi_step = "board start";
 +    printf("NEZHA WIFI: thread awake after %u s, registering the control socket\n", wifi_delay);
@@ -2601,7 +2626,7 @@ diff --git a/bsd/dev/qcom/PeachApple80211.c b/bsd/dev/qcom/PeachApple80211.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/qcom/PeachApple80211.c
-@@ -0,0 +1,330 @@
+@@ -0,0 +1,346 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* iOS 16 Apple80211 ioctl/event ABI, as recorded in HackiOS redwood's
 + * redwood_apple80211.c. Only implemented Peach operations/capabilities are
@@ -2899,7 +2924,12 @@ new file mode 100644
 +    }
 +    return EOPNOTSUPP;
 +}
-+int peach_apple80211_ioctl(u_long command, void *data)
++/* Every request wifid makes arrives here. Nothing else in this kernel can tell
++ * whether it ever found the interface, so the first few dozen calls are worth
++ * their lines: if none appear, wifid never bound and the toggle is dead above
++ * us; if they do, the type and result say exactly which step it refused. */
++static unsigned apple_calls;
++static int apple_ioctl(u_long command, void *data)
 +{
 +    if (command != APPLE_SET && command != APPLE_GET) return EOPNOTSUPP;
 +    AppleRequest *r = data;
@@ -2909,6 +2939,17 @@ new file mode 100644
 +        return err ? err : set(r);
 +    }
 +    return get(r);
++}
++int peach_apple80211_ioctl(u_long command, void *data)
++{
++    int err = apple_ioctl(command, data);
++    AppleRequest *r = data;
++    if (r && apple_calls < 40) {
++        apple_calls++;
++        printf("NEZHA WIFI: a80211 %s type %d length %u -> %d\n",
++            command == APPLE_SET ? "set" : "get", r->type, r->length, err);
++    }
++    return err;
 +}
 +static void post(unsigned code, const void *data, unsigned bytes)
 +{
@@ -8775,7 +8816,7 @@ diff --git a/iokit/Kernel/arm/PeachWLAN.cpp b/iokit/Kernel/arm/PeachWLAN.cpp
 new file mode 100644
 --- /dev/null
 +++ b/iokit/Kernel/arm/PeachWLAN.cpp
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,216 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* IO80211.framework's ioctl fallback and SystemConfiguration discovery,
 + * following HackiOS RedwoodWLAN's registry contract. The data interface
@@ -8881,6 +8922,27 @@ new file mode 100644
 +}
 +IOReturn IONetworkStackUserClient::setProperties(OSObject *)
 +{ return kIOReturnUnsupported; }
++/* IO80211.framework reaches the interface by opening a user client on it. There
++ * is none on purpose - the open fails, the framework logs "Falling back to IOCTL
++ * path", and from then on everything is an ioctl this kernel answers. So a
++ * successful open is not wanted; knowing that somebody tried is, because it is
++ * the only evidence in this log that wifid found the node at all. */
++class PeachInterface : public IONetworkInterface {
++    OSDeclareDefaultStructors(PeachInterface);
++public:
++    virtual IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type,
++        OSDictionary *properties, IOUserClient **handler) APPLE_KEXT_OVERRIDE;
++};
++OSDefineMetaClassAndStructors(PeachInterface, IONetworkInterface);
++IOReturn
++PeachInterface::newUserClient(task_t, void *, UInt32 type, OSDictionary *, IOUserClient **handler)
++{
++    static unsigned said;
++    if (said++ < 8)
++        IOLog("NEZHA WIFI: user client type %u asked for on en0; there is none\n", (unsigned)type);
++    if (handler != NULL) *handler = NULL;
++    return kIOReturnUnsupported;
++}
 +static int network_stack_publish(void)
 +{
 +    IOService *resources = IOService::getResourceService();
@@ -8899,14 +8961,25 @@ new file mode 100644
 +    stack->release(); return error;
 +}
 +extern "C" int peach_wlan_publish(const char *, const unsigned char *);
-+extern "C" int peach_wlan_publish(const char *name, const unsigned char *mac)
++extern "C" int peach_wlan_publish_nodes(const unsigned char *);
++
++/* The two nodes wifid looks for carry properties only, so they can exist long
++ * before the link does. Publishing them at the top of the worker thread puts
++ * them in the registry before launchd's wifid walks it; log89 published them
++ * at 33.7 s, inside the run of configd's own discovery, which is late enough
++ * to be missed. The network stack is different: configd opens it to publish
++ * en0's name and then makes a service for that name, so it still waits for the
++ * BSD interface (log89: "network stack opened by configd" right after
++ * ifnet_attach). */
++static bool nodes_published;
++extern "C" int
++peach_wlan_publish_nodes(const unsigned char *mac)
 +{
-+    int stack_error = network_stack_publish();
-+    if (stack_error) return stack_error;
++    if (nodes_published) return 0;
 +    IOService *provider = IOService::getPlatform();
 +    IO80211Controller *controller = new IO80211Controller;
-+    IONetworkInterface *interface = new IONetworkInterface;
-+    OSData *address = OSData::withBytes(mac, 6);
++    PeachInterface *interface = new PeachInterface;
++    OSData *address = mac ? OSData::withBytes(mac, 6) : NULL;
 +    if (!provider || !controller || !interface || !address || !controller->init() || !interface->init()) {
 +        OSSafeReleaseNULL(controller); OSSafeReleaseNULL(interface); OSSafeReleaseNULL(address);
 +        return ENOMEM;
@@ -8916,8 +8989,8 @@ new file mode 100644
 +    controller->setProperty("IOBuiltin", true);
 +    address->release();
 +    interface->setName("NezhaPeachInterface");
-+    interface->setProperty("IOInterfaceName", name);
-+    interface->setProperty("BSD Name", name);
++    interface->setProperty("IOInterfaceName", "en0");
++    interface->setProperty("BSD Name", "en0");
 +    interface->setProperty("IOInterfaceNamePrefix", "en");
 +    interface->setProperty("IOInterfaceType", 6ULL, 32);
 +    interface->setProperty("IOInterfaceUnit", 0ULL, 32);
@@ -8930,8 +9003,8 @@ new file mode 100644
 +            if (interface->attach(controller)) {
 +                if (interface->start(controller)) {
 +                    controller->registerService(); interface->registerService();
-+                    IOLog("NEZHA WIFI: Apple80211 ioctl interface %s published (link separate)\n", name);
-+                    error = 0;
++                    IOLog("NEZHA WIFI: registry nodes for en0 published\n");
++                    nodes_published = true; error = 0;
 +                } else interface->detach(controller);
 +            }
 +            if (error) controller->stop(provider);
@@ -8940,8 +9013,25 @@ new file mode 100644
 +    }
 +    interface->release(); controller->release(); return error;
 +}
++
++static bool stack_published;
++extern "C" int
++peach_wlan_publish(const char *name, const unsigned char *mac)
++{
++    (void)name;
++    int error = peach_wlan_publish_nodes(mac);
++    if (error) return error;
++    if (!stack_published) {
++        error = network_stack_publish();
++        if (error) return error;
++        stack_published = true;
++    }
++    IOLog("NEZHA WIFI: Apple80211 ioctl interface en0 published (link separate)\n");
++    return 0;
++}
 +#else
 +extern "C" int peach_wlan_publish(const char *, const unsigned char *) { return EOPNOTSUPP; }
++extern "C" int peach_wlan_publish_nodes(const unsigned char *) { return EOPNOTSUPP; }
 +#endif
 diff --git a/bsd/conf/files b/bsd/conf/files
 --- a/bsd/conf/files
