@@ -2,7 +2,7 @@ diff --git a/bsd/dev/pandora_wifi.c b/bsd/dev/pandora_wifi.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/pandora_wifi.c
-@@ -0,0 +1,1678 @@
+@@ -0,0 +1,1696 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* Nezha/SM8850 Peach: board power, CESTA v3, PCIe0 and isolated firmware DMA.
 + * Register sequences follow Qualcomm's pci-msm.c, crm-v2.c, clk-rpmh.c and
@@ -470,10 +470,27 @@ new file mode 100644
 +    WIFI_TRY(wifi_wr(W_DBI, 0x78, (value & 0x8fff) | 0x5000));
 +    WIFI_TRY(wifi_modify(W_PARF, 0x2c4, 1, 0));
 +    WIFI_TRY(wifi_pin(W_PERST, 0, 0, 1, 0, 1));
++    {
++        uint32_t gpio = 0;
++        (void)wifi_rd(W_PERST, 4, &gpio);
++        printf("NEZHA WIFI: PERST released, pin out register %#x\n", gpio);
++    }
 +    wifi_sleep(NULL, 1000);
 +    wifi_step = "PCIe link training";
 +    WIFI_TRY(wifi_modify(W_PARF, 0x1b0, 0, 1u << 8));
-+    WIFI_TRY(wifi_poll(W_DBI, 0xf28, 0x400, 0x400, 100));
++    {
++        /* Keep the raw state on a timeout: LTSSM, link status, training
++         * control and the PHY PLL lock bit say which half never came up. */
++        int lerr = wifi_poll(W_DBI, 0xf28, 0x400, 0x400, 100);
++        uint32_t ltssm = 0, status = 0, parf = 0, phy = 0;
++        (void)wifi_rd(W_DBI, 0xf28, &ltssm);
++        (void)wifi_rd(W_DBI, 0x80, &status);
++        (void)wifi_rd(W_PARF, 0x1b0, &parf);
++        (void)wifi_rd(W_PHY, 0x414, &phy);
++        printf("NEZHA WIFI: link poll %s; DBI 0xf28 %#x 0x80 %#x PARF 0x1b0 %#x PHY 0x414 %#x\n",
++            lerr ? "timed out" : "ok", ltssm, status, parf, phy);
++        if (lerr) return lerr;
++    }
 +    WIFI_TRY(wifi_poll(W_DBI, 0x80, 1u << 29, 1u << 29, 100));
 +    WIFI_TRY(wifi_rd(W_DBI, 0x80, &value));
 +    printf("NEZHA WIFI: PCIe Gen%u x%u\n", (value >> 16) & 15, (value >> 20) & 63);
@@ -488,6 +505,7 @@ new file mode 100644
 +    WIFI_TRY(wifi_atu(2, 0, 0x40300000, 0x43ffffff, 0x40300000));
 +    wifi_step = "Peach endpoint";
 +    WIFI_TRY(wifi_rd(W_CFG, 0, &value));
++    printf("NEZHA WIFI: endpoint config id %#x (want 0x110e17cb)\n", value);
 +    if (value != 0x110e17cb) return ENODEV;
 +    WIFI_TRY(wifi_mask_interrupts());
 +    WIFI_TRY(wifi_rd(W_CFG, 4, &value));
