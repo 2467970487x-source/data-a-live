@@ -2,7 +2,7 @@ diff --git a/bsd/dev/pandora_wifi.c b/bsd/dev/pandora_wifi.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/pandora_wifi.c
-@@ -0,0 +1,1831 @@
+@@ -0,0 +1,1845 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* Nezha/SM8850 Peach: board power, CESTA v3, PCIe0 and isolated firmware DMA.
 + * Register sequences follow Qualcomm's pci-msm.c, crm-v2.c, clk-rpmh.c and
@@ -1451,22 +1451,36 @@ new file mode 100644
 +        printf("NEZHA WIFI: manual join SSID %.*s security %u\n",
 +            wifi_request.join.ssid_bytes, wifi_request.join.ssid, wifi_request.join.security);
 +    if (wifi_tx.bound) {
-+        /* Keyed peer retirement is not implemented. Reuse the checked
-+         * endpoint reset and fresh DMA path instead of reusing live keys,
-+         * queues or cookies. Manual switches share its bounded budget. */
-+        if (wifi_recoveries >= WIFI_RECOVERIES) {
-+            peach_net_status(&wifi_wmi, wifi_net_state, EBUSY);
-+            goto clear_request;
-+        }
-+        printf("NEZHA WIFI: manual leave/switch reset %u/%u RX %llu/%llu TX %llu/%llu/%llu\n",
-+            ++wifi_recoveries, WIFI_RECOVERIES, wifi_rx.received, wifi_rx.discarded,
++        /* Preferred: retire the live link in place. Peer delete makes the
++         * firmware drop its pairwise/group keys with the peer, so the switch
++         * costs neither a firmware reload nor one of the three recoveries. The
++         * budget ran out after three switches before, which is exactly how a
++         * phone that had joined two networks ended up unable to join any. */
++        printf("NEZHA WIFI: manual leave/switch in place RX %llu/%llu TX %llu/%llu/%llu\n",
++            wifi_rx.received, wifi_rx.discarded,
 +            wifi_tx.submitted, wifi_tx.acked, wifi_tx.dropped);
-+        wifi_net_state = PeachNetReady;
-+        peach_net_leave(); peach_rsn_clear(&wifi_rsn);
-+        unsigned char mac[6]; memcpy(mac, wifi_wmi.mac, sizeof(mac));
-+        err = wifi_restart_mission(wifi_wlfw.calibration);
-+        if (!err && memcmp(mac, wifi_wmi.mac, sizeof(mac))) err = EIO;
-+        if (err) goto clear_request;
++        err = peach_station_leave(&wifi_station);
++        if (!err) {
++            printf("NEZHA WIFI: link retired in place; firmware kept, recoveries %u/%u\n",
++                wifi_recoveries, WIFI_RECOVERIES);
++            peach_rsn_clear(&wifi_rsn);
++            wifi_net_state = PeachNetReady;
++            peach_net_leave();
++        } else {
++            printf("NEZHA WIFI: in-place retirement failed %d; resetting the endpoint\n", err);
++            if (wifi_recoveries >= WIFI_RECOVERIES) {
++                peach_net_status(&wifi_wmi, wifi_net_state, EBUSY);
++                goto clear_request;
++            }
++            printf("NEZHA WIFI: manual leave/switch reset %u/%u\n",
++                ++wifi_recoveries, WIFI_RECOVERIES);
++            wifi_net_state = PeachNetReady;
++            peach_net_leave(); peach_rsn_clear(&wifi_rsn);
++            unsigned char mac[6]; memcpy(mac, wifi_wmi.mac, sizeof(mac));
++            err = wifi_restart_mission(wifi_wlfw.calibration);
++            if (!err && memcmp(mac, wifi_wmi.mac, sizeof(mac))) err = EIO;
++            if (err) goto clear_request;
++        }
 +    }
 +    if (wifi_request.action == PeachControlLeave) {
 +        wifi_request.action = 0;
@@ -2655,7 +2669,7 @@ diff --git a/bsd/dev/qcom/PeachApple80211.c b/bsd/dev/qcom/PeachApple80211.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/qcom/PeachApple80211.c
-@@ -0,0 +1,355 @@
+@@ -0,0 +1,350 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* iOS 16 Apple80211 ioctl/event ABI, as recorded in HackiOS redwood's
 + * redwood_apple80211.c. Only implemented Peach operations/capabilities are
@@ -2953,13 +2967,13 @@ new file mode 100644
 +    }
 +    return EOPNOTSUPP;
 +}
-+/* Every request wifid makes arrives here. Nothing else in this kernel can tell
-+ * whether it ever found the interface, so the first request of each
-+ * (command,type) pair is worth its line: the 40-call window used before was
-+ * exhausted during the very first handshake, which left the switch/re-join
-+ * phase of log95 with no record of what wifid asked for when it aborted. */
-+static struct { unsigned char command; unsigned char type; } apple_seen[128];
-+static unsigned apple_seen_count;
++/* Every request wifid makes arrives here. One line per call, capped so a long
++ * browsing session cannot flood the 4 MB ring: a userspace abort leaves the
++ * last line before it as the only evidence of what it was asking for, and the
++ * deduped "first of each type" scheme used before went silent exactly during
++ * the switch that crashed wifid. */
++static unsigned apple_calls;
++#define APPLE_CALL_LINES 6000u
 +static int apple_ioctl(u_long command, void *data)
 +{
 +    if (command != APPLE_SET && command != APPLE_GET) return EOPNOTSUPP;
@@ -2976,16 +2990,11 @@ new file mode 100644
 +    int err = apple_ioctl(command, data);
 +    AppleRequest *r = data;
 +    if (!r || (command != APPLE_SET && command != APPLE_GET)) return err;
-+    unsigned i, room = sizeof(apple_seen) / sizeof(apple_seen[0]);
-+    for (i = 0; i < apple_seen_count; i++)
-+        if (apple_seen[i].command == (unsigned char)command &&
-+            apple_seen[i].type == (unsigned char)r->type) break;
-+    if (i == apple_seen_count && apple_seen_count < room) {
-+        apple_seen[i].command = (unsigned char)command;
-+        apple_seen[i].type = (unsigned char)r->type;
-+        apple_seen_count++;
-+        printf("NEZHA WIFI: a80211 first %s type %u length %u -> %d\n",
++    if (apple_calls < APPLE_CALL_LINES) {
++        unsigned n = ++apple_calls;
++        printf("NEZHA WIFI: a80211 %u %s type %d length %u -> %d\n", n,
 +            command == APPLE_SET ? "set" : "get", r->type, r->length, err);
++        if (n == APPLE_CALL_LINES) printf("NEZHA WIFI: a80211 log full after %u calls\n", n);
 +    }
 +    return err;
 +}
@@ -6097,7 +6106,7 @@ diff --git a/bsd/dev/qcom/PeachStation.c b/bsd/dev/qcom/PeachStation.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/qcom/PeachStation.c
-@@ -0,0 +1,325 @@
+@@ -0,0 +1,357 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* 802.11 legacy STA MLME over Peach WMI management TX/RX. No synthetic
 + * responses or autonomous network choice. Firmware wire format is handled
@@ -6423,11 +6432,43 @@ new file mode 100644
 +    if (err) return err;
 +    return peach_station_init(s, w, s->htt, s->rx, t);
 +}
++/* Bring a live, keyed link down without resetting the firmware: drain what is
++ * in flight, retire the peer (the firmware drops its pairwise/group keys with
++ * it), release the host queues and bindings, and put the station back in Idle
++ * so the next selection can associate from scratch. The old code could only
++ * switch networks by restarting the whole endpoint, which cost one of three
++ * recoveries and left the radio unusable once they were spent. */
++int peach_station_leave(PeachStation *s)
++{
++    if (!s || !s->wmi || !s->tx || !s->rx || !s->htt) return PeachMhiInvalid;
++    PeachWmi *w = s->wmi; PeachTx *t = s->tx;
++    if (w->error || s->htt->error || s->rx->error || t->error || w->key_pending)
++        return PeachMhiInvalid;
++    if (s->phase == PeachStationIdle) return 0;
++    if (!s->peer_generation) return PeachMhiInvalid;
++    (void)peach_tx_authorize(t, 0);
++    s->phase = PeachStationFailed; /* no new MLME while teardown polls */
++    uint64_t end = now(s) + 10000000;
++    while (t->in_flight || w->mgmt_in_flight) {
++        int err = progress(s);
++        if (err) return err;
++        if (now(s) >= end) return PeachMhiTimeout;
++        sleep_ms(s);
++    }
++    int err = peach_wmi_retire_keyed(w, s->htt, s->peer_generation);
++    if (err) return err;
++    PeachMhiDma queues;
++    err = w->ops.allocate(w->ops.context, PEACH_RX_QUEUE_BYTES, &queues);
++    if (!err) err = peach_rx_new_queues(s->rx, queues);
++    if (!err) err = peach_tx_unbind(t);
++    if (err) return err;
++    return peach_station_init(s, w, s->htt, s->rx, t);
++}
 diff --git a/bsd/dev/qcom/PeachStation.h b/bsd/dev/qcom/PeachStation.h
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/qcom/PeachStation.h
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,42 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +#ifndef PEACH_STATION_H
 +#define PEACH_STATION_H
@@ -6467,6 +6508,8 @@ new file mode 100644
 +/* Recover an unsuccessful pre-key association. Refuses installed keys,
 + * transport errors or ambiguous completions; never reuses old REO queues. */
 +int peach_station_recover_unkeyed(PeachStation *);
++/* Teardown of a live keyed link, no firmware reset, no recovery budget. */
++int peach_station_leave(PeachStation *);
 +#endif
 diff --git a/bsd/dev/qcom/PeachTx.c b/bsd/dev/qcom/PeachTx.c
 new file mode 100644
@@ -7386,7 +7429,7 @@ diff --git a/bsd/dev/qcom/PeachWmi.c b/bsd/dev/qcom/PeachWmi.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/qcom/PeachWmi.c
-@@ -0,0 +1,1293 @@
+@@ -0,0 +1,1319 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* Minimal single-station WMI initialization. Wire offsets/tags are from
 + * fw-api/fw/{wmi.h,wmi_unified.h,wmi_tlv_defs.h,wmi_services.h,wlan_defs.h}
@@ -8646,13 +8689,21 @@ new file mode 100644
 +    p32(w->command + 24, s->protected_network ? 1 : 2);
 +    return send_command(w, 0x6004, 28);
 +}
-+int peach_wmi_retire_unkeyed(PeachWmi *w, PeachHtt *h, uint32_t generation)
++/* Teardown of one association. keyed=0 is the original unkeyed retirement used
++ * when association failed before the four-way handshake; keyed=1 is the same
++ * sequence for a live, keyed link: peer delete makes the firmware drop the
++ * pairwise and group keys with the peer, so the host side only has to forget
++ * them instead of refusing the teardown. Both leave the firmware MISSION state
++ * untouched (no endpoint reset, no recovery budget spent), which is what a
++ * network switch needs. */
++static int retire_common(PeachWmi *w, PeachHtt *h, uint32_t generation, int keyed)
 +{
 +    if (!w || !h || !w->ready || !generation || w->scan_active ||
 +        w->mgmt_in_flight || w->key_pending || !service(w, 92)) return PeachMhiInvalid;
 +    if (w->error || h->error) return w->error ? w->error : h->error;
-+    for (unsigned i = 0; i < 5; i++)
-+        if (w->keys[i].installed) return PeachMhiInvalid;
++    if (!keyed)
++        for (unsigned i = 0; i < 5; i++)
++            if (w->keys[i].installed) return PeachMhiInvalid;
 +    PeachWmiPeer *s = peer_find(w, w->vdev_bssid);
 +    const PeachHttPeer *p = peach_htt_peer(h, 0, w->vdev_bssid);
 +    if (!s || !s->type || !s->create_sent || s->delete_sent ||
@@ -8678,13 +8729,31 @@ new file mode 100644
 +    w->vdev_frequency = w->vdev_reg_generation = 0;
 +    w->mgmt_head = w->mgmt_count = w->mgmt_done = 0;
 +    memset(w->vdev_bssid, 0, sizeof(w->vdev_bssid));
++    if (keyed) {
++        /* The peer that owned these keys is gone, so the host copy is dead
++         * weight; keeping it would make the next association look keyed. */
++        for (unsigned i = 0; i < 5; i++) {
++            memset(w->keys[i].bytes, 0, sizeof(w->keys[i].bytes));
++            w->keys[i].installed = 0;
++            w->keys[i].generation = 0;
++        }
++        w->key_pending = 0;
++    }
 +    return 0;
++}
++int peach_wmi_retire_unkeyed(PeachWmi *w, PeachHtt *h, uint32_t generation)
++{
++    return retire_common(w, h, generation, 0);
++}
++int peach_wmi_retire_keyed(PeachWmi *w, PeachHtt *h, uint32_t generation)
++{
++    return retire_common(w, h, generation, 1);
 +}
 diff --git a/bsd/dev/qcom/PeachWmi.h b/bsd/dev/qcom/PeachWmi.h
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/qcom/PeachWmi.h
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,169 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +#ifndef PEACH_WMI_H
 +#define PEACH_WMI_H
@@ -8828,6 +8897,8 @@ new file mode 100644
 + * peer generation, real STOP/DELETE responses and HTT unmap before reset.
 + * Queue descriptors and packet DMA remain allocated by their owners. */
 +int peach_wmi_retire_unkeyed(PeachWmi *, PeachHtt *, uint32_t peer_generation);
++/* Same teardown for a live keyed link: peer delete drops the firmware keys. */
++int peach_wmi_retire_keyed(PeachWmi *, PeachHtt *, uint32_t peer_generation);
 +/* Program four EDCA queues from the AP's WMM parameters, or defaults
 + * for a legacy AP. No U-APSD or MU-EDCA is enabled. */
 +int peach_wmi_wmm(PeachWmi *, const unsigned char *ies, size_t bytes);
