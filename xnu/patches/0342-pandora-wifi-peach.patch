@@ -2,7 +2,7 @@ diff --git a/bsd/dev/pandora_wifi.c b/bsd/dev/pandora_wifi.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/pandora_wifi.c
-@@ -0,0 +1,1618 @@
+@@ -0,0 +1,1653 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* Nezha/SM8850 Peach: board power, CESTA v3, PCIe0 and isolated firmware DMA.
 + * Register sequences follow Qualcomm's pci-msm.c, crm-v2.c, clk-rpmh.c and
@@ -70,6 +70,11 @@ new file mode 100644
 +};
 +static int wifi_fault, wifi_wait;
 +static unsigned wifi_phase, wifi_bank, wifi_slot, wifi_msi_cap;
++/* pandora_wifi=N stops after phase N, so each step of the ladder can be
++ * checked on its own: 1 board power, 2 PCIe resources, 3 link, 4 DMA,
++ * 5 firmware. 6 or more runs the whole bring-up. */
++static unsigned wifi_stage_limit;
++#define WIFI_STAGED 3000
 +static const char *wifi_step = "init";
 +static uint64_t wifi_arena_pa, wifi_tables_pa;
 +static vm_offset_t wifi_arena, wifi_tables;
@@ -1322,14 +1327,28 @@ new file mode 100644
 +    return 0;
 +}
 +
++/* Stop the ladder after phase N when pandora_wifi=N asked for a stage. */
++#define WIFI_STAGE(n) do { \
++        if (wifi_stage_limit != 0 && wifi_stage_limit <= (n)) { \
++            printf("NEZHA WIFI: staged stop after phase %u in %s; boot-arg pandora_wifi=%u\n", \
++                (n), wifi_step, wifi_stage_limit); \
++            return WIFI_STAGED; \
++        } \
++    } while (0)
++
 +static int wifi_start(void)
 +{
 +    for (unsigned i = 0; i < W_NWIN; i++) WIFI_TRY(wifi_map(i));
 +    WIFI_TRY(wifi_power());
++    WIFI_STAGE(1);
 +    WIFI_TRY(wifi_pcie_resources());
++    WIFI_STAGE(2);
 +    WIFI_TRY(wifi_pcie_link());
++    WIFI_STAGE(3);
 +    WIFI_TRY(wifi_dma());
++    WIFI_STAGE(4);
 +    WIFI_TRY(wifi_boot_firmware((PeachMhiDma){0}));
++    WIFI_STAGE(5);
 +    wifi_step = "cold boot calibration";
 +    int err = peach_wlfw_calibrate(&wifi_wlfw);
 +    if (err) {
@@ -1556,6 +1575,14 @@ new file mode 100644
 +    wifi_sleep(NULL, 20000000);
 +    int err = peach_net_init();
 +    if (!err) err = wifi_start();
++    if (err == WIFI_STAGED) {
++        /* The ladder stopped where the boot-arg asked. Everything up to that
++         * point stays powered and mapped, which is the state the next stage
++         * is meant to be tested from. */
++        printf("NEZHA WIFI: phase %u reached; stopping as asked (pandora_wifi=%u)\n",
++            wifi_phase, wifi_stage_limit);
++        thread_terminate(current_thread());
++    }
 +    if (!err) {
 +        wifi_net_state = PeachNetReady;
 +        peach_net_status(&wifi_wmi, wifi_net_state, wifi_wmi.scan_done ? 0 : EAGAIN);
@@ -1603,21 +1630,29 @@ new file mode 100644
 +{
 +    int on = 0;
 +    thread_t thread;
-+    (void)PE_parse_boot_argn("nezha_wifi", &on, sizeof(on));
-+    if (on != 1) return;
++    (void)PE_parse_boot_argn("pandora_wifi", &on, sizeof(on));
++    if (on >= 1) {
++        wifi_stage_limit = on >= 6 ? 0 : (unsigned)on;
++    } else {
++        (void)PE_parse_boot_argn("nezha_wifi", &on, sizeof(on));
++        if (on != 1) return;
++    }
 +    DTEntry root;
 +    const void *data;
 +    unsigned size = 0;
 +    if (SecureDTLookupEntry(NULL, "/", &root) != kSuccess ||
 +        SecureDTGetProperty(root, "compatible", &data, &size) != kSuccess) return;
-+    bool nezha = false;
++    bool board = false;
 +    for (unsigned off = 0; off < size;) {
 +        size_t n = strnlen((const char *)data + off, size - off);
 +        if (n == size - off) return;
-+        if (n == 12 && !memcmp((const char *)data + off, "xiaomi,nezha", 12)) nezha = true;
++        if ((n == 14 && !memcmp((const char *)data + off, "xiaomi,pandora", 14)) ||
++            (n == 12 && !memcmp((const char *)data + off, "xiaomi,nezha", 12))) board = true;
 +        off += (unsigned)n + 1;
 +    }
-+    if (!nezha) return;
++    if (!board) return;
++    printf("NEZHA WIFI: board %s, stage limit %u (0 = full) for the Peach endpoint\n",
++        "xiaomi,pandora", wifi_stage_limit);
 +    if (kernel_thread_start(wifi_thread, NULL, &thread) == KERN_SUCCESS) thread_deallocate(thread);
 +}
 +#endif
@@ -1625,7 +1660,7 @@ diff --git a/bsd/dev/pandora_wifi_deps.c b/bsd/dev/pandora_wifi_deps.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/pandora_wifi_deps.c
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,510 @@
 +/* SPDX-License-Identifier: MIT */
 +/*
 + * Host-side dependencies of the Peach (WCN7860 / cnss-peach) Wi-Fi driver.
@@ -1633,22 +1668,47 @@ new file mode 100644
 + * The Nezha tree defines these in its own platform files. data-a-live keeps
 + * them here so bsd/dev/pandora_wifi.c and bsd/dev/qcom/Peach*.c link as-is.
 + *
-+ * This patch only has to build: the RSC/GCC votes and the firmware-container
-+ * reader come in a later patch, once the driver is known to compile. Until
-+ * then every entry point reports what it was asked for and returns success so
-+ * the init path can run further.
++ * Two services:
++ *
++ * RPMh. The board rails and the PCIe clock are voted through the apps RSC
++ * "drv-2" at 0x18920000 (SM8850, same window bsd/dev/pandora_adsp.c and
++ * pandora_touch.c use) with the aop_cmd_db_region at 0x81c60000. Nezha's
++ * driver asks for one command per call, and its type is the byte offset inside
++ * the cmd-db address block that Linux's rpmh-regulator uses:
++ *
++ *	type 0  voltage in mV   type 4  enable
++ *	type 8  mode            (rpmh_regulator "mode" vote, PMIC7 OPM)
++ *
++ * The mode vote is not optional: a rail that gets voltage and enable but no
++ * mode stays unpowered on this PMIC, and the PCIe link then never trains.
++ *
++ * Firmware. peach/amss20.bin and the PHY/board files live on the iOS root, not
++ * in the 40 MB adspfw pack, which has no room for them; the pack is still only
++ * used to install small files. Reads go through the VFS, the same way
++ * bsd/dev/pandora_files.c writes, and the vnode is kept open because the MHI
++ * download reads the image in many small pieces.
 + */
 +#include <sys/param.h>
 +#include <sys/systm.h>
 +#include <sys/errno.h>
 +#include <sys/types.h>
++#include <sys/fcntl.h>
++#include <sys/vnode.h>
++#include <sys/vnode_internal.h>
++#include <sys/mount_internal.h>
++#include <sys/vfs_context.h>
++#include <sys/kauth.h>
 +#include <kern/locks.h>
++#include <kern/clock.h>
 +
 +/*
 + * 8796 installs neither kern/printf.h nor kern/misc_protos.h into the kernel
 + * header set, so declare printf here. Same prototype as osfmk/kern/misc_protos.h.
 + */
 +extern int printf(const char *fmt, ...) __printflike(1, 2);
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern void delay(int);
++extern vnode_t rootvnode;
 +
 +static lck_grp_t *pandora_wifi_grp;
 +static lck_mtx_t *pandora_wifi_smmu_mtx;
@@ -1664,23 +1724,422 @@ new file mode 100644
 +		pandora_wifi_smmu_mtx = lck_mtx_alloc_init(pandora_wifi_grp, LCK_ATTR_NULL);
 +}
 +
++/* ---- RPMh: apps RSC DRV 2 and the cmd-db --------------------------------------- */
++
++#define W_RSC_PA      0x18920000u
++#define W_CMDDB_PA    0x81c60000u
++#define W_CMDDB_SIZE  0x20000u
++#define W_TCS_OFF     0xd00u          /* DT drv@2 qcom,tcs-offset */
++#define W_TCS_STRIDE  0x2a0u          /* qcom,tcs-distance */
++#define W_TCS_ACTIVE  3u              /* qcom,tcs-config: ACTIVE 3 first */
++#define W_DB_MAGIC    0x0c0330dbu
++#define W_DB_HEADER   144u
++#define W_DB_ENTRY    24u
++
++/* Register offsets per RSC major version (Linux rpmh-rsc.c ver_2_7 / ver_3_0). */
++struct w_layout {
++	uint32_t wait, control, status, enable, msgid, addr, data, cstatus, cmd_stride;
++};
++static const struct w_layout w_lay_v2 = {0x10, 0x14, 0x18, 0x1c, 0x30, 0x34, 0x38, 0x3c, 20};
++static const struct w_layout w_lay_v3 = {0x20, 0x24, 0x28, 0x2c, 0x34, 0x38, 0x3c, 0x40, 24};
++
++static vm_offset_t w_rsc, w_db;
++static const struct w_layout *w_lay;
++static int w_map_error;
++
++struct w_cmd {
++	uint32_t addr, data;
++};
++
++static uint32_t
++w_rd(vm_offset_t b, uint32_t off)
++{
++	return *(volatile uint32_t *)(b + off);
++}
++
++static void
++w_wr(vm_offset_t b, uint32_t off, uint32_t v)
++{
++	*(volatile uint32_t *)(b + off) = v;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static uint16_t
++w_db16(uint32_t off)
++{
++	return (uint16_t)(w_rd(w_db, off & ~3u) >> (8u * (off & 3u)));
++}
++
++/* Map both windows once and refuse a controller layout we do not know. */
++static int
++w_map(void)
++{
++	if (w_rsc != 0)
++		return w_map_error;
++	w_rsc = ml_io_map(W_RSC_PA, 0x10000);
++	w_db = ml_io_map(W_CMDDB_PA, W_CMDDB_SIZE);
++	if (w_rsc == 0 || w_db == 0) {
++		printf("PANDORA WIFI: RPMh map failed rsc %#lx db %#lx\n",
++		    (unsigned long)w_rsc, (unsigned long)w_db);
++		w_map_error = ENOMEM;
++		return w_map_error;
++	}
++	uint32_t id = w_rd(w_rsc, 0), config = w_rd(w_rsc, 0x0c);
++	unsigned major = (id >> 16) & 0xffu, minor = (id >> 8) & 0xffu;
++	unsigned ntcs = (config >> (6u * 2u)) & 0x3fu, ncpt = (config >> 27) & 0x1fu;
++	printf("PANDORA WIFI: RSC id=%#x (v%u.%u) config=%#x tcs=%u ncpt=%u cmd-db %#x/%#x\n",
++	    id, major, minor, config, ntcs, ncpt, w_rd(w_db, 0), w_rd(w_db, 4));
++	if (major == 3) {
++		w_lay = &w_lay_v3;
++	} else if (major == 2) {
++		w_lay = &w_lay_v2;
++	} else {
++		w_lay = NULL;
++	}
++	if (w_lay == NULL || ntcs < W_TCS_ACTIVE) {
++		printf("PANDORA WIFI: RSC layout not known; rail votes disabled\n");
++		w_map_error = ENODEV;
++		return ENODEV;
++	}
++	if (w_rd(w_db, 4) != W_DB_MAGIC) {
++		printf("PANDORA WIFI: cmd-db magic %#x; rail votes disabled\n", w_rd(w_db, 4));
++		w_map_error = ENODEV;
++		return ENODEV;
++	}
++	return 0;
++}
++
++/* cmd-db entry by 8-byte resource name: address, aux table offset and length. */
++static int
++w_cmddb(const char *res, uint32_t *addr, uint32_t *aux, uint32_t *auxlen)
++{
++	uint32_t key[2] = {0, 0};
++	for (unsigned i = 0; i < 8 && res[i]; i++)
++		key[i / 4] |= (uint32_t)(uint8_t)res[i] << (8u * (i % 4));
++	for (unsigned i = 0; i < 8; i++) {
++		uint32_t h = 8u + 16u * i;
++		if (w_db16(h) == 0)
++			break;
++		uint32_t entries = W_DB_HEADER + w_db16(h + 2), data = W_DB_HEADER + w_db16(h + 4);
++		unsigned count = w_db16(h + 6);
++		for (unsigned j = 0; j < count && entries + W_DB_ENTRY * (j + 1) <= W_CMDDB_SIZE; j++) {
++			uint32_t e = entries + W_DB_ENTRY * j;
++			if (w_rd(w_db, e) != key[0] || w_rd(w_db, e + 4) != key[1])
++				continue;
++			if (addr != NULL)
++				*addr = w_rd(w_db, e + 16);
++			if (auxlen != NULL)
++				*auxlen = w_db16(e + 20);
++			if (aux != NULL)
++				*aux = data + w_db16(e + 22);
++			return 0;
++		}
++	}
++	return ENOENT;
++}
++
++/*
++ * Send 1..8 commands as one ACTIVE TCS transaction. The inherited busy TCS
++ * state of the bootloader is never touched: a slot is used only when its
++ * status/control/enable/wait words say it is idle.
++ */
++static int
++w_send(const struct w_cmd *cmd, unsigned n)
++{
++	int err = w_map();
++	if (err) {
++		return err;
++	}
++	if (n == 0 || n > 8) {
++		return EINVAL;
++	}
++	unsigned t = W_TCS_ACTIVE;
++	uint32_t base = 0;
++	for (unsigned i = 0; i < W_TCS_ACTIVE; i++) {
++		uint32_t b = W_TCS_OFF + i * W_TCS_STRIDE;
++		uint32_t st = w_rd(w_rsc, b + w_lay->status);
++		if (st == 0 || st == 0xffffffffu) {
++			continue;
++		}
++		if (w_rd(w_rsc, b + w_lay->control) != 0 || w_rd(w_rsc, b + w_lay->enable) != 0 ||
++		    w_rd(w_rsc, b + w_lay->wait) != 0) {
++			continue;
++		}
++		t = i;
++		base = b;
++		break;
++	}
++	if (t == W_TCS_ACTIVE) {
++		printf("PANDORA WIFI: RPMh no free ACTIVE TCS\n");
++		return EBUSY;
++	}
++	uint32_t bit = 1u << t;
++	uint32_t irq_en = w_rd(w_rsc, W_TCS_OFF);
++	w_wr(w_rsc, W_TCS_OFF, irq_en & ~bit);
++	for (unsigned i = 0; i < n; i++) {
++		uint32_t c = base + i * w_lay->cmd_stride;
++		w_wr(w_rsc, c + w_lay->msgid, 8u | (1u << 8) | (1u << 16));
++		w_wr(w_rsc, c + w_lay->addr, cmd[i].addr);
++		w_wr(w_rsc, c + w_lay->data, cmd[i].data);
++	}
++	uint32_t mask = (1u << n) - 1u;
++	w_wr(w_rsc, base + w_lay->wait, mask);
++	w_wr(w_rsc, base + w_lay->enable, mask);
++	w_wr(w_rsc, base + w_lay->control, 0);
++	w_wr(w_rsc, base + w_lay->control, 1u << 16);
++	w_wr(w_rsc, base + w_lay->control, (1u << 16) | (1u << 24));
++	bool done = false;
++	uint32_t cs = 0;
++	for (unsigned i = 0; i < 100000 && !done; i++) {
++		bool all = true;
++		for (unsigned c = 0; c < n; c++) {
++			cs = w_rd(w_rsc, base + w_lay->cstatus + c * w_lay->cmd_stride);
++			all &= (cs & 0x10100u) == 0x10100u;
++		}
++		done = all && w_rd(w_rsc, base + w_lay->status) != 0;
++		if (!done) {
++			delay(1);
++		}
++	}
++	w_wr(w_rsc, base + w_lay->control, 1u << 16);
++	w_wr(w_rsc, base + w_lay->control, 0);
++	w_wr(w_rsc, base + w_lay->enable, 0);
++	w_wr(w_rsc, base + w_lay->wait, 0);
++	w_wr(w_rsc, W_TCS_OFF + 8, bit);
++	w_wr(w_rsc, W_TCS_OFF, irq_en);
++	if (!done) {
++		printf("PANDORA WIFI: RPMh TCS%u timeout, cmd-status %#x\n", t, cs);
++		return ETIMEDOUT;
++	}
++	return 0;
++}
++
++/* Resolved resources. The board asks for 8 names at most; 16 leaves room. */
++struct w_res {
++	char name[12];
++	uint32_t addr, aux, auxlen;
++};
++static struct w_res w_res[16];
++static unsigned w_nres;
++
++static int
++w_resolve(const char *name, uint32_t *addr, uint32_t *aux, uint32_t *auxlen)
++{
++	if (name == NULL || strlen(name) >= sizeof(w_res[0].name)) {
++		return EINVAL;
++	}
++	for (unsigned i = 0; i < w_nres; i++) {
++		if (strcmp(w_res[i].name, name) != 0) {
++			continue;
++		}
++		if (addr != NULL) {
++			*addr = w_res[i].addr;
++		}
++		if (aux != NULL) {
++			*aux = w_res[i].aux;
++		}
++		if (auxlen != NULL) {
++			*auxlen = w_res[i].auxlen;
++		}
++		return 0;
++	}
++	struct w_res r;
++	memset(&r, 0, sizeof(r));
++	strlcpy(r.name, name, sizeof(r.name));
++	int err = w_cmddb(r.name, &r.addr, &r.aux, &r.auxlen);
++	if (err) {
++		printf("PANDORA WIFI: cmd-db has no \"%s\"\n", name);
++		return err;
++	}
++	if (w_nres < 16) {
++		w_res[w_nres++] = r;
++	}
++	if (addr != NULL) {
++		*addr = r.addr;
++	}
++	if (aux != NULL) {
++		*aux = r.aux;
++	}
++	if (auxlen != NULL) {
++		*auxlen = r.auxlen;
++	}
++	return 0;
++}
++
 +/* RPMh resource vote: type 0 = voltage (mV), 4 = enable, 8 = mode. */
 +int
 +pandora_rpmh_resource(const char *name, uint32_t type, uint32_t value)
 +{
-+	printf("PANDORA WIFI: rpmh %s type %u value %u (no RSC vote yet)\n",
-+	    name ? name : "?", type, value);
-+	return 0;
++	uint32_t addr = 0;
++	if (type != 0 && type != 4 && type != 8) {
++		return EINVAL;
++	}
++	int err = w_resolve(name, &addr, NULL, NULL);
++	if (err) {
++		return err;
++	}
++	struct w_cmd c = {addr + type, value};
++	err = w_send(&c, 1);
++	printf("PANDORA WIFI: rpmh %s %s=%u (addr %#x) -> %d\n", name,
++	    type == 0 ? "voltage" : (type == 4 ? "enable" : "mode"), value, addr, err);
++	return err;
 +}
 +
-+/* RPMh ARC clock vote, e.g. "lmx.lvl". */
++/*
++ * RPMh ARC clock vote, e.g. "lmx.lvl" 384. The command carries the index of
++ * the first aux-table level at or above the requested one; the same encoding
++ * bsd/dev/pandora_adsp.c uses for LCX/LMX.
++ */
 +int
 +pandora_rpmh_arc(const char *name, uint32_t value)
 +{
-+	printf("PANDORA WIFI: rpmh arc %s %u (no RSC vote yet)\n",
-+	    name ? name : "?", value);
++	uint32_t addr = 0, aux = 0, len = 0;
++	int err = w_resolve(name, &addr, &aux, &len);
++	if (err) {
++		return err;
++	}
++	uint32_t n = len / 2, index = 0, got = 0;
++	for (; index < n; index++) {
++		got = w_db16(aux + 2 * index);
++		if (got >= value) {
++			break;
++		}
++	}
++	if (n == 0) {
++		printf("PANDORA WIFI: ARC %s has no levels\n", name);
++		return EINVAL;
++	}
++	if (index == n) {
++		index = n - 1;
++	}
++	struct w_cmd c = {addr, index};
++	err = w_send(&c, 1);
++	printf("PANDORA WIFI: arc %s %u of %u levels -> index %u (level %u) addr %#x -> %d\n",
++	    name, value, n, index, got, addr, err);
++	return err;
++}
++
++/* ---- firmware on the root file system ------------------------------------------ */
++
++#define W_FW_DIR   "/private/var/pandora/firmware/"
++#define W_FW_MAX   8
++
++struct w_fw {
++	char name[48];
++	vnode_t vp;
++	uint64_t size;
++};
++static struct w_fw w_fw[W_FW_MAX];
++static unsigned w_nfw;
++static vfs_context_t w_ctx;
++
++static struct w_fw *
++w_fw_find(const char *name)
++{
++	for (unsigned i = 0; i < w_nfw; i++) {
++		if (strcmp(w_fw[i].name, name) == 0) {
++			return &w_fw[i];
++		}
++	}
++	return NULL;
++}
++
++static int
++w_fw_open(const char *name, struct w_fw **out)
++{
++	struct w_fw *e = w_fw_find(name);
++	if (e != NULL) {
++		*out = e;
++		return 0;
++	}
++	if (w_nfw == W_FW_MAX) {
++		return EMFILE;
++	}
++	size_t nl = strlen(name);
++	if (nl >= sizeof(w_fw[0].name)) {
++		return ENAMETOOLONG;
++	}
++	if (rootvnode == NULLVP) {
++		printf("PANDORA WIFI: firmware %s: root not mounted\n", name);
++		return ENXIO;
++	}
++	char path[160];
++	size_t dl = strlen(W_FW_DIR);
++	if (dl + nl + 1 > sizeof(path)) {
++		return ENAMETOOLONG;
++	}
++	memcpy(path, W_FW_DIR, dl);
++	memcpy(path + dl, name, nl + 1);
++	if (w_ctx == NULL) {
++		w_ctx = vfs_context_kernel();
++	}
++	vnode_t vp = NULLVP;
++	int err = vnode_open(path, FREAD, 0, 0, &vp, w_ctx);
++	if (err) {
++		printf("PANDORA WIFI: firmware %s: open %s failed %d\n", name, path, err);
++		return err;
++	}
++	struct vnode_attr va;
++	VATTR_INIT(&va);
++	VATTR_WANTED(&va, va_data_size);
++	uint64_t size = 0;
++	if (vnode_getattr(vp, &va, w_ctx) == 0) {
++		size = (uint64_t)va.va_data_size;
++	}
++	e = &w_fw[w_nfw++];
++	memset(e, 0, sizeof(*e));
++	memcpy(e->name, name, nl);
++	e->vp = vp;
++	e->size = size;
++	*out = e;
++	printf("PANDORA WIFI: firmware %s: %llu bytes in %s\n", name,
++	    (unsigned long long)size, path);
 +	return 0;
 +}
++
++/*
++ * Read a firmware file. size receives the whole length (a size query passes
++ * n == 0); only [off, off + n) is copied.
++ */
++int
++pandora_firmware_pread(const char *name, uint64_t off, void *p, size_t n, uint64_t *size)
++{
++	if (size != NULL) {
++		*size = 0;
++	}
++	if (name == NULL || name[0] == 0) {
++		return EINVAL;
++	}
++	struct w_fw *e = NULL;
++	int err = w_fw_open(name, &e);
++	if (err) {
++		return err;
++	}
++	if (size != NULL) {
++		*size = e->size;
++	}
++	if (n == 0) {
++		return 0;
++	}
++	if (p == NULL || n > (1u << 30) || off > e->size || off + n > e->size) {
++		printf("PANDORA WIFI: firmware %s: read %llu+%zu outside %llu bytes\n", name,
++		    (unsigned long long)off, n, (unsigned long long)e->size);
++		return EINVAL;
++	}
++	int resid = 0;
++	err = vn_rdwr(UIO_READ, e->vp, (caddr_t)p, (int)n, (off_t)off, UIO_SYSSPACE, 0,
++	    vfs_context_ucred(w_ctx), &resid, vfs_context_proc(w_ctx));
++	if (err == 0 && resid != 0) {
++		err = EIO;
++	}
++	if (err) {
++		printf("PANDORA WIFI: firmware %s: read %llu+%zu failed %d (resid %d)\n", name,
++		    (unsigned long long)off, n, err, resid);
++	}
++	return err;
++}
++
++/* ---- SMMU lock and interface publication --------------------------------------- */
 +
 +void
 +pandora_apps_smmu_lock(void)
@@ -1695,21 +2154,6 @@ new file mode 100644
 +{
 +	if (pandora_wifi_smmu_mtx != NULL)
 +		lck_mtx_unlock(pandora_wifi_smmu_mtx);
-+}
-+
-+/*
-+ * Read a member of the firmware container. size receives the whole member
-+ * length; only [off, off + n) is copied.
-+ */
-+int
-+pandora_firmware_pread(const char *name, uint64_t off, void *p, size_t n,
-+    uint64_t *size)
-+{
-+	if (size != NULL)
-+		*size = 0;
-+	printf("PANDORA WIFI: firmware %s read %llu+%zu (no container reader yet)\n",
-+	    name ? name : "?", (unsigned long long)off, n);
-+	return ENOSYS;
 +}
 +
 +/*
@@ -8300,3 +8744,22 @@ diff --git a/bsd/conf/files b/bsd/conf/files
 +bsd/dev/qcom/PeachWlfw.c		standard
 +bsd/dev/qcom/PeachWmi.c			standard
  bsd/dev/qcom/QcomSmem.c			standard
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -69,4 +69,5 @@ extern void pandora_usb_init(void);
+ extern void pandora_cpu_init(void);
+ extern void pandora_therm_init(void);
+ extern void pandora_usb_init(void);
++extern void pandora_wifi_init(void);
+ #endif
+@@ -1583,7 +1583,9 @@ sweet_ufs_init(void)
+ 	/* Board thermistors, read only, boot-arg pandora_therm (bsd/dev/pandora_therm.c). */
+ 	pandora_therm_init();
+ 	/* USB controller handover state, read only, boot-arg pandora_usb (bsd/dev/pandora_usb.c). */
+ 	pandora_usb_init();
++	/* Wi-Fi endpoint bring-up, boot-arg pandora_wifi=N (bsd/dev/pandora_wifi.c). */
++	pandora_wifi_init();
+ #endif
+ 	/* Power / volume keys (bsd/dev/fuxi_keys.c, SPMI arbiter v7). */
+ 	fuxi_keys_init();
