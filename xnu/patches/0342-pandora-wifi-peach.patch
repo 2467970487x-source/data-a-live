@@ -1643,7 +1643,7 @@ new file mode 100644
 +#include <sys/errno.h>
 +#include <sys/types.h>
 +#include <kern/locks.h>
-+#include <kern/printf.h>
++#include <kern/misc_protos.h>	/* printf; there is no kern/printf.h in 8796 */
 +
 +static lck_grp_t *pandora_wifi_grp;
 +static lck_mtx_t *pandora_wifi_smmu_mtx;
