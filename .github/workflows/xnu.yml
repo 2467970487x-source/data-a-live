@@ -71,7 +71,28 @@ jobs:
         env:
           # keep going after errors so one run reports every compile failure
           MAKEFLAGS: ${{ inputs.keep_going == 'false' && '' || '-k' }}
-        run: bash build.sh
+        # The build prints tens of megabytes; a failing step's log is cut at 4 MB,
+        # which loses the errors. Keep the full log in a file and print a digest.
+        run: |
+          set -o pipefail
+          if bash build.sh > build.log 2>&1; then
+            tail -20 build.log
+          else
+            echo "=== compile errors ==="
+            grep -nE "error:|fatal error|Error:|\*\*\* \[" build.log \
+              | grep -vE "patch failed|does not apply|already exists|Skipping patch" \
+              | head -80 || true
+            echo "=== last 60 lines ==="
+            tail -60 build.log
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: xnu-buildlog
+          path: dxb/build.log
+          retention-days: 7
 
       - name: Package build tree for local compiles
         if: always()
