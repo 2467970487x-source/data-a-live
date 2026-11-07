@@ -2,7 +2,7 @@ diff --git a/bsd/dev/pandora_wifi.c b/bsd/dev/pandora_wifi.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/pandora_wifi.c
-@@ -0,0 +1,1653 @@
+@@ -0,0 +1,1676 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* Nezha/SM8850 Peach: board power, CESTA v3, PCIe0 and isolated firmware DMA.
 + * Register sequences follow Qualcomm's pci-msm.c, crm-v2.c, clk-rpmh.c and
@@ -74,6 +74,10 @@ new file mode 100644
 + * checked on its own: 1 board power, 2 PCIe resources, 3 link, 4 DMA,
 + * 5 firmware. 6 or more runs the whole bring-up. */
 +static unsigned wifi_stage_limit;
++/* Seconds to wait before the bring-up thread touches anything. The default
++ * keeps the ladder clear of the GPU bring-up window; a value set with
++ * pandora_wifi_delay=N moves it without recompiling. */
++static unsigned wifi_delay = 20;
 +#define WIFI_STAGED 3000
 +static const char *wifi_step = "init";
 +static uint64_t wifi_arena_pa, wifi_tables_pa;
@@ -152,14 +156,24 @@ new file mode 100644
 +    vm_size_t bytes = round_page(w->bytes + (w->pa - pa));
 +    vm_offset_t va = 0;
 +    if (w->va) return 0;
++    printf("NEZHA WIFI: map window %u pa %#llx bytes %#llx\n", index, pa, (uint64_t)bytes);
 +    if (kmem_alloc(kernel_map, &va, bytes, KMA_VAONLY | KMA_KOBJECT | KMA_NOPAGEWAIT,
-+        VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) return ENOMEM;
++        VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++        printf("NEZHA WIFI: map window %u kernel_map alloc failed\n", index);
++        return ENOMEM;
++    }
 +    for (vm_size_t off = 0; off < bytes; off += PAGE_SIZE) {
-+        if (pmap_enter_options_addr(kernel_pmap, va + off, pa + off,
++        kern_return_t kr = pmap_enter_options_addr(kernel_pmap, va + off, pa + off,
 +            VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, VM_WIMG_IO, TRUE,
-+            PMAP_OPTIONS_NOWAIT, NULL) != KERN_SUCCESS) return ENOMEM;
++            PMAP_OPTIONS_NOWAIT, NULL);
++        if (kr != KERN_SUCCESS) {
++            printf("NEZHA WIFI: map window %u pmap_enter failed %#x at page %#llx\n",
++                index, kr, (uint64_t)(off / PAGE_SIZE));
++            return ENOMEM;
++        }
 +    }
 +    w->va = va + (w->pa - pa);
++    printf("NEZHA WIFI: map window %u ok va %#llx\n", index, (uint64_t)w->va);
 +    return 0;
 +}
 +
@@ -1572,9 +1586,15 @@ new file mode 100644
 +wifi_thread(void *unused, wait_result_t result)
 +{
 +    (void)unused; (void)result;
-+    wifi_sleep(NULL, 20000000);
++    wifi_sleep(NULL, wifi_delay * 1000000);
++    wifi_step = "board start";
++    printf("NEZHA WIFI: thread awake after %u s, registering the control socket\n", wifi_delay);
 +    int err = peach_net_init();
-+    if (!err) err = wifi_start();
++    if (err) printf("NEZHA WIFI: control socket registration failed %d\n", err);
++    if (!err) {
++        printf("NEZHA WIFI: control socket registered, mapping %u register windows\n", W_NWIN);
++        err = wifi_start();
++    }
 +    if (err == WIFI_STAGED) {
 +        /* The ladder stopped where the boot-arg asked. Everything up to that
 +         * point stays powered and mapped, which is the state the next stage
@@ -1633,6 +1653,9 @@ new file mode 100644
 +    (void)PE_parse_boot_argn("pandora_wifi", &on, sizeof(on));
 +    if (on >= 1) {
 +        wifi_stage_limit = on >= 6 ? 0 : (unsigned)on;
++        int delay = 0;
++        (void)PE_parse_boot_argn("pandora_wifi_delay", &delay, sizeof(delay));
++        if (delay > 0) wifi_delay = (unsigned)delay;
 +    } else {
 +        (void)PE_parse_boot_argn("nezha_wifi", &on, sizeof(on));
 +        if (on != 1) return;
@@ -1651,8 +1674,8 @@ new file mode 100644
 +        off += (unsigned)n + 1;
 +    }
 +    if (!board) return;
-+    printf("NEZHA WIFI: board %s, stage limit %u (0 = full) for the Peach endpoint\n",
-+        "xiaomi,pandora", wifi_stage_limit);
++    printf("NEZHA WIFI: board %s, stage limit %u (0 = full), thread delay %u s for the Peach endpoint\n",
++        "xiaomi,pandora", wifi_stage_limit, wifi_delay);
 +    if (kernel_thread_start(wifi_thread, NULL, &thread) == KERN_SUCCESS) thread_deallocate(thread);
 +}
 +#endif
