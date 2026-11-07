@@ -2,7 +2,7 @@ diff --git a/bsd/dev/pandora_wifi.c b/bsd/dev/pandora_wifi.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/pandora_wifi.c
-@@ -0,0 +1,1676 @@
+@@ -0,0 +1,1678 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* Nezha/SM8850 Peach: board power, CESTA v3, PCIe0 and isolated firmware DMA.
 + * Register sequences follow Qualcomm's pci-msm.c, crm-v2.c, clk-rpmh.c and
@@ -253,6 +253,8 @@ new file mode 100644
 +        WIFI_TRY(pandora_rpmh_resource(rails[i].name, 0, rails[i].mv));
 +        if (rails[i].mode) WIFI_TRY(pandora_rpmh_resource(rails[i].name, 8, rails[i].mode));
 +        WIFI_TRY(pandora_rpmh_resource(rails[i].name, 4, 1));
++        printf("NEZHA WIFI: rail %s %u mV mode %u voted on\n",
++            rails[i].name, rails[i].mv, rails[i].mode);
 +    }
 +    WIFI_TRY(pandora_rpmh_resource("C1A_E0", 4, 1));
 +    WIFI_TRY(wifi_modify(W_SW, 0, 0x3c, 1u << 2));
@@ -1683,7 +1685,7 @@ diff --git a/bsd/dev/pandora_wifi_deps.c b/bsd/dev/pandora_wifi_deps.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/pandora_wifi_deps.c
-@@ -0,0 +1,584 @@
+@@ -0,0 +1,595 @@
 +/* SPDX-License-Identifier: MIT */
 +/*
 + * Host-side dependencies of the Peach (WCN7860 / cnss-peach) Wi-Fi driver.
@@ -1812,7 +1814,9 @@ new file mode 100644
 +	unsigned ntcs = (config >> (6u * 2u)) & 0x3fu, ncpt = (config >> 27) & 0x1fu;
 +	printf("PANDORA WIFI: RSC id=%#x (v%u.%u) config=%#x tcs=%u ncpt=%u cmd-db %#x/%#x\n",
 +	    id, major, minor, config, ntcs, ncpt, w_rd(w_db, 0), w_rd(w_db, 4));
-+	if (major == 3) {
++	if (major >= 3) {
++		/* Linux uses the 3.0 layout for every major >= 3, and this RSC
++		 * reads v4.3 (same conclusion as pandora_touch.c, patch 0131). */
 +		w_lay = &w_lay_v3;
 +	} else if (major == 2) {
 +		w_lay = &w_lay_v2;
@@ -1934,6 +1938,7 @@ new file mode 100644
 +		printf("PANDORA WIFI: RPMh TCS%u timeout, cmd-status %#x\n", t, cs);
 +		return ETIMEDOUT;
 +	}
++	printf("PANDORA WIFI: tcs %u base %#x cmd %u acked %#x\n", t, base, n, cs);
 +	return 0;
 +}
 +
@@ -1950,6 +1955,13 @@ new file mode 100644
 +{
 +	if (name == NULL || strlen(name) >= sizeof(w_res[0].name)) {
 +		return EINVAL;
++	}
++	/* The cmd-db walk below reads through w_db. Only w_send() used to call
++	 * w_map(), so the very first rail vote dereferenced a NULL window at
++	 * cmd-db header offset 8 and took a data abort before any RSC print. */
++	int merr = w_map();
++	if (merr) {
++		return merr;
 +	}
 +	for (unsigned i = 0; i < w_nres; i++) {
 +		if (strcmp(w_res[i].name, name) != 0) {
@@ -1974,6 +1986,7 @@ new file mode 100644
 +		printf("PANDORA WIFI: cmd-db has no \"%s\"\n", name);
 +		return err;
 +	}
++	printf("PANDORA WIFI: %s -> addr %#x aux %#x/%u\n", name, r.addr, r.aux, r.auxlen);
 +	if (w_nres < 16) {
 +		w_res[w_nres++] = r;
 +	}
