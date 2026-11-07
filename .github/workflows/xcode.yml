@@ -1,0 +1,11 @@
+name: xcode
+
+on:
+  workflow_dispatch:
+
+jobs:
+  list:
+    runs-on: macos-15
+    timeout-minutes: 5
+    steps:
+      - run: ls /Applications | grep -i xcode; echo ---; xcode-select -p; xcodebuild -version
