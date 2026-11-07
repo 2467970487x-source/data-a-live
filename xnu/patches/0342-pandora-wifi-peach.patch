@@ -8284,11 +8284,3 @@ diff --git a/bsd/conf/files b/bsd/conf/files
 +bsd/dev/qcom/PeachWlfw.c		standard
 +bsd/dev/qcom/PeachWmi.c			standard
  bsd/dev/qcom/QcomSmem.c			standard
-diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
---- a/iokit/conf/files.arm64
-+++ b/iokit/conf/files.arm64
-@@ -20,3 +20,4 @@
- iokit/Kernel/arm/PandoraAudio.cpp                                optional iokitcpp
- iokit/Kernel/arm/SweetGIC.cpp                                    optional iokitcpp
-+iokit/Kernel/arm/PeachWLAN.cpp                                   optional iokitcpp
- iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp
