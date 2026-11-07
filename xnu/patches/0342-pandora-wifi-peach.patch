@@ -2669,7 +2669,7 @@ diff --git a/bsd/dev/qcom/PeachApple80211.c b/bsd/dev/qcom/PeachApple80211.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/qcom/PeachApple80211.c
-@@ -0,0 +1,350 @@
+@@ -0,0 +1,370 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* iOS 16 Apple80211 ioctl/event ABI, as recorded in HackiOS redwood's
 + * redwood_apple80211.c. Only implemented Peach operations/capabilities are
@@ -2953,6 +2953,26 @@ new file mode 100644
 +         * or overrides the firmware's board-specific regulatory rules. */
 +        if (!err) { PeachNetRequest request = { .action = PeachControlScan }; err = peach_net_request(&request); }
 +        kfree_data(a, sizeof(*a)); return err;
++    }
++    if (r->type == 383) {
++        /* iOS 16 hides its second scan entry point behind an undocumented set
++         * (4104 bytes, i.e. a 4096-byte body plus a header). wifid was aborting
++         * half a second after this call returned EOPNOTSUPP, and the join it
++         * was asked for never reached the driver, so treat it as a scan and
++         * dump the header once: if the guess is wrong the hex says what it is
++         * without another build. */
++        unsigned char head[32] = {0};
++        if (r->length >= 8 && r->data) (void)copyin(r->data, head, sizeof(head));
++        static unsigned dumps;
++        if (dumps < 4) {
++            dumps++;
++            printf("NEZHA WIFI: set 383 length %u head %02x%02x%02x%02x %02x%02x%02x%02x "
++                "%02x%02x%02x%02x %02x%02x%02x%02x\n", r->length,
++                head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7],
++                head[8], head[9], head[10], head[11], head[12], head[13], head[14], head[15]);
++        }
++        PeachNetRequest request = { .action = PeachControlScan };
++        return peach_net_request(&request);
 +    }
 +    if (r->type == 19) {
 +        uint32_t power[6];
