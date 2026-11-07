@@ -1660,7 +1660,7 @@ diff --git a/bsd/dev/pandora_wifi_deps.c b/bsd/dev/pandora_wifi_deps.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/pandora_wifi_deps.c
-@@ -0,0 +1,510 @@
+@@ -0,0 +1,584 @@
 +/* SPDX-License-Identifier: MIT */
 +/*
 + * Host-side dependencies of the Peach (WCN7860 / cnss-peach) Wi-Fi driver.
@@ -2024,14 +2024,69 @@ new file mode 100644
 +#define W_FW_DIR   "/private/var/pandora/firmware/"
 +#define W_FW_MAX   8
 +
++/* Where a firmware file came from: the root file system, or the pinned pack. */
++struct w_pack_ent;
 +struct w_fw {
 +	char name[48];
 +	vnode_t vp;
++	struct w_pack_ent *pe;
 +	uint64_t size;
 +};
 +static struct w_fw w_fw[W_FW_MAX];
 +static unsigned w_nfw;
 +static vfs_context_t w_ctx;
++
++/*
++ * Fallback source: the pinned pack that pandora_fw_read() serves and that
++ * bsd/dev/pandora_adsp.c and pandora_files.c already read (PANDFW01 header,
++ * 64-byte directory entries). Small files fit there today; the Wi-Fi firmware
++ * is expected on the root instead, because the pack is 40 MB and nearly full.
++ */
++extern int pandora_fw_read(uint64_t off, void *dst, uint64_t len);
++
++struct w_pack_ent {
++	char name[48];
++	uint64_t off, size;
++};
++static struct w_pack_ent w_pack[64];
++static unsigned w_npack;
++static int w_pack_state;    /* 0 not read yet, 1 read, negative: the error */
++static uint8_t w_pack_blk[4096];
++
++static int
++w_pack_dir(void)
++{
++	if (w_pack_state != 0) {
++		return w_pack_state > 0 ? 0 : -w_pack_state;
++	}
++	int err = pandora_fw_read(0, w_pack_blk, sizeof(w_pack_blk));
++	if (err) {
++		w_pack_state = -err;
++		return err;
++	}
++	uint32_t n;
++	memcpy(&n, w_pack_blk + 8, 4);
++	if (memcmp(w_pack_blk, "PANDFW01", 8) || n == 0 || n > 64) {
++		w_pack_state = -EINVAL;
++		return EINVAL;
++	}
++	memcpy(w_pack, w_pack_blk + 16, n * sizeof(struct w_pack_ent));
++	w_npack = n;
++	w_pack_state = 1;
++	return 0;
++}
++
++static struct w_pack_ent *
++w_pack_find(const char *name)
++{
++	for (unsigned i = 0; i < w_npack; i++) {
++		w_pack[i].name[sizeof(w_pack[i].name) - 1] = 0;
++		if (strcmp(w_pack[i].name, name) == 0) {
++			return &w_pack[i];
++		}
++	}
++	return NULL;
++}
 +
 +static struct w_fw *
 +w_fw_find(const char *name)
@@ -2044,6 +2099,7 @@ new file mode 100644
 +	return NULL;
 +}
 +
++/* Open the file from the root; on failure look for the same name in the pack. */
 +static int
 +w_fw_open(const char *name, struct w_fw **out)
 +{
@@ -2059,41 +2115,55 @@ new file mode 100644
 +	if (nl >= sizeof(w_fw[0].name)) {
 +		return ENAMETOOLONG;
 +	}
-+	if (rootvnode == NULLVP) {
-+		printf("PANDORA WIFI: firmware %s: root not mounted\n", name);
-+		return ENXIO;
-+	}
-+	char path[160];
-+	size_t dl = strlen(W_FW_DIR);
-+	if (dl + nl + 1 > sizeof(path)) {
-+		return ENAMETOOLONG;
-+	}
-+	memcpy(path, W_FW_DIR, dl);
-+	memcpy(path + dl, name, nl + 1);
-+	if (w_ctx == NULL) {
-+		w_ctx = vfs_context_kernel();
-+	}
++	int root_err = ENOENT;
 +	vnode_t vp = NULLVP;
-+	int err = vnode_open(path, FREAD, 0, 0, &vp, w_ctx);
-+	if (err) {
-+		printf("PANDORA WIFI: firmware %s: open %s failed %d\n", name, path, err);
-+		return err;
-+	}
-+	struct vnode_attr va;
-+	VATTR_INIT(&va);
-+	VATTR_WANTED(&va, va_data_size);
 +	uint64_t size = 0;
-+	if (vnode_getattr(vp, &va, w_ctx) == 0) {
-+		size = (uint64_t)va.va_data_size;
++	if (rootvnode == NULLVP) {
++		root_err = ENXIO;
++	} else {
++		char path[160];
++		size_t dl = strlen(W_FW_DIR);
++		if (dl + nl + 1 > sizeof(path)) {
++			return ENAMETOOLONG;
++		}
++		memcpy(path, W_FW_DIR, dl);
++		memcpy(path + dl, name, nl + 1);
++		if (w_ctx == NULL) {
++			w_ctx = vfs_context_kernel();
++		}
++		root_err = vnode_open(path, FREAD, 0, 0, &vp, w_ctx);
++		if (root_err == 0) {
++			struct vnode_attr va;
++			VATTR_INIT(&va);
++			VATTR_WANTED(&va, va_data_size);
++			if (vnode_getattr(vp, &va, w_ctx) == 0) {
++				size = (uint64_t)va.va_data_size;
++			}
++			printf("PANDORA WIFI: firmware %s: %llu bytes in %s\n", name,
++			    (unsigned long long)size, path);
++		}
++	}
++	struct w_pack_ent *pe = NULL;
++	if (root_err != 0) {
++		if (w_pack_dir() == 0) {
++			pe = w_pack_find(name);
++		}
++		if (pe == NULL) {
++			printf("PANDORA WIFI: firmware %s: %s not in the root (%d) nor in the pack\n",
++			    name, W_FW_DIR, root_err);
++			return root_err;
++		}
++		size = pe->size;
++		printf("PANDORA WIFI: firmware %s: %llu bytes from the pack\n", name,
++		    (unsigned long long)size);
 +	}
 +	e = &w_fw[w_nfw++];
 +	memset(e, 0, sizeof(*e));
 +	memcpy(e->name, name, nl);
 +	e->vp = vp;
++	e->pe = pe;
 +	e->size = size;
 +	*out = e;
-+	printf("PANDORA WIFI: firmware %s: %llu bytes in %s\n", name,
-+	    (unsigned long long)size, path);
 +	return 0;
 +}
 +
@@ -2126,15 +2196,19 @@ new file mode 100644
 +		    (unsigned long long)off, n, (unsigned long long)e->size);
 +		return EINVAL;
 +	}
-+	int resid = 0;
-+	err = vn_rdwr(UIO_READ, e->vp, (caddr_t)p, (int)n, (off_t)off, UIO_SYSSPACE, 0,
-+	    vfs_context_ucred(w_ctx), &resid, vfs_context_proc(w_ctx));
-+	if (err == 0 && resid != 0) {
-+		err = EIO;
++	if (e->pe != NULL) {
++		err = pandora_fw_read(e->pe->off + off, p, n);
++	} else {
++		int resid = 0;
++		err = vn_rdwr(UIO_READ, e->vp, (caddr_t)p, (int)n, (off_t)off, UIO_SYSSPACE, 0,
++		    vfs_context_ucred(w_ctx), &resid, vfs_context_proc(w_ctx));
++		if (err == 0 && resid != 0) {
++			err = EIO;
++		}
 +	}
 +	if (err) {
-+		printf("PANDORA WIFI: firmware %s: read %llu+%zu failed %d (resid %d)\n", name,
-+		    (unsigned long long)off, n, err, resid);
++		printf("PANDORA WIFI: firmware %s: read %llu+%zu failed %d\n", name,
++		    (unsigned long long)off, n, err);
 +	}
 +	return err;
 +}
