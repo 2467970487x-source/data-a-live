@@ -1625,7 +1625,7 @@ diff --git a/bsd/dev/pandora_wifi_deps.c b/bsd/dev/pandora_wifi_deps.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/pandora_wifi_deps.c
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,85 @@
 +/* SPDX-License-Identifier: MIT */
 +/*
 + * Host-side dependencies of the Peach (WCN7860 / cnss-peach) Wi-Fi driver.
@@ -1643,7 +1643,12 @@ new file mode 100644
 +#include <sys/errno.h>
 +#include <sys/types.h>
 +#include <kern/locks.h>
-+#include <kern/misc_protos.h>	/* printf; there is no kern/printf.h in 8796 */
++
++/*
++ * 8796 installs neither kern/printf.h nor kern/misc_protos.h into the kernel
++ * header set, so declare printf here. Same prototype as osfmk/kern/misc_protos.h.
++ */
++extern int printf(const char *fmt, ...) __printflike(1, 2);
 +
 +static lck_grp_t *pandora_wifi_grp;
 +static lck_mtx_t *pandora_wifi_smmu_mtx;
