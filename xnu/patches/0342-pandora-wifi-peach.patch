@@ -2741,7 +2741,7 @@ diff --git a/bsd/dev/qcom/PeachApple80211.c b/bsd/dev/qcom/PeachApple80211.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/qcom/PeachApple80211.c
-@@ -0,0 +1,444 @@
+@@ -0,0 +1,443 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* iOS 16 Apple80211 ioctl/event ABI, as recorded in HackiOS redwood's
 + * redwood_apple80211.c. Only implemented Peach operations/capabilities are
@@ -3099,7 +3099,6 @@ new file mode 100644
 +        if (r->length < sizeof(power)) return EINVAL;
 +        int err = copyin(r->data, power, sizeof(power));
 +        if (err) return err;
-+        PeachNetInfo info; peach_net_info(&info);
 +        if (power[0] != 1 || power[1] != 1 || power[2] > 1) return EOPNOTSUPP;
 +        if (!power[2]) {
 +            /* The switch in Settings is the operator's own way out of a wedged
