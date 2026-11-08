@@ -1,0 +1,86 @@
+name: nbfix
+
+# Builds the two MTLHeap size queries NativeAdrenoMetal's device class is missing, links the
+# library into the driver bundle, and re-signs it ad hoc.  Every step needs macOS (iOS SDK,
+# codesign) and none of it touches the Wi-Fi tree, so it is a workflow of its own.
+#
+# Input: the release nbfix-src (NativeAdrenoMetal, Info.plist, NativeAdrenoMetal.clients).
+# Output: nbfix-bundle.tar.gz with the patched bundle and the library, plus the cdhash that
+# has to go into the trust cache.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: nbfix
+  cancel-in-progress: true
+
+jobs:
+  sign:
+    runs-on: macos-15
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Take the driver bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p in
+          gh release download nbfix-src --pattern 'NativeAdrenoMetal*' --dir in --clobber
+          ls -l in
+
+      - name: Assemble the bundle and build the library
+        run: |
+          set -eu
+          mkdir -p bundle out
+          cp in/NativeAdrenoMetal bundle/
+          cp in/NativeAdrenoMetal.clients bundle/
+          if [ -f in/Info.plist ]; then cp in/Info.plist bundle/; else cp in/NativeAdrenoMetal.Info.plist bundle/Info.plist; fi
+
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "sdk: $SDK"
+          clang -arch arm64 -isysroot "$SDK" -mios-version-min=16.0 \
+                -dynamiclib -O2 -fno-objc-arc -Wall \
+                -install_name @loader_path/nbfix.dylib \
+                -o out/nbfix.dylib tools/gpu-driver/nbfix.m
+          file out/nbfix.dylib
+          nm -gU out/nbfix.dylib | head
+
+      - name: Link the library into the driver
+        run: |
+          set -eu
+          python3 tools/gpu-driver/patch_lc.py bundle/NativeAdrenoMetal nbfix.dylib
+          cp out/nbfix.dylib bundle/nbfix.dylib
+          otool -L bundle/NativeAdrenoMetal | tail -3
+
+      - name: Sign ad hoc and report the cdhash
+        run: |
+          set -eu
+          codesign --remove-signature bundle/NativeAdrenoMetal 2>/dev/null || true
+          codesign --force --sign - --timestamp=none --identifier org.blu-sharky.NativeAdrenoMetal bundle/NativeAdrenoMetal
+          codesign --force --sign - --timestamp=none --identifier org.blu-sharky.nbfix bundle/nbfix.dylib
+          codesign -dvvv bundle/NativeAdrenoMetal 2>&1 | tee out/sign.txt
+          codesign -dvvv bundle/nbfix.dylib 2>&1 | tee -a out/sign.txt
+          {
+            echo "driver $(codesign -dvvv bundle/NativeAdrenoMetal 2>&1 | sed -n 's/^CDHash=//p')"
+            echo "nbfix  $(codesign -dvvv bundle/nbfix.dylib 2>&1 | sed -n 's/^CDHash=//p')"
+          } | tee out/cdhash.txt
+          ls -l bundle
+
+      - name: Pack
+        run: |
+          set -eu
+          tar -czf nbfix-bundle.tar.gz -C bundle .
+          ls -lh nbfix-bundle.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nbfix-bundle
+          path: |
+            nbfix-bundle.tar.gz
+            out/cdhash.txt
+            out/sign.txt
