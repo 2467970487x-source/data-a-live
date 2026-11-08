@@ -2364,6 +2364,8 @@ gpu_window_of(unsigned client, uint64_t *start, uint64_t *size)
 	}
 }
 static bool gpu_ready;
+static uint32_t gpu_stuck_ticks;   /* 0343: watch ticks in a row with no ring timestamp, work pending */
+static uint32_t gpu_restarts;      /* 0343: ring restarts after a hang, at most 3 a boot */
 static uint32_t gpu_bo_gen;
 static uint32_t gpu_chip_id = 0x44050a01u;
 
@@ -3625,6 +3627,74 @@ gpu_hang_dump(uint32_t ring)
 }
 
 /*
+ * 0343: the CP stopped. Two watch ticks (10 s) with work pending and no ring timestamp means the
+ * fences of that work will never be written, and every process that renders through the GPU waits on
+ * them: backboardd stops compositing (the screen freezes, the phone has to be reset) and the app's
+ * Metal calls never return. Restart the SQE microcode and the ring as the bring-up does, drop what
+ * the CP still held, and wake the waiters: the submissions after the restart run on a fresh ring, so
+ * the system keeps a GPU and the app that hung it gets its commands back with an error instead of the
+ * whole phone freezing. Under the lock.
+ */
+static bool
+gpu_ring_restart(uint32_t stuck)
+{
+	gpu_restarts++;
+	printf("PANDORA GPU RESTART: ring stuck at %u with %u issued: stopping the SQE and restarting the ring "
+	    "(attempt %u)\n", stuck, gpu_seqno, gpu_restarts);
+	/* 1. Stop the microcode where it is; whatever it still holds is gone. */
+	gw(CP_SQE_CNTL, 0);
+	(void)gr(CP_SQE_CNTL);
+	delay(2000);
+	/* 2. Point the ring back at its first dword. The read pointers the CP keeps in the scratch page
+	 * (BR at +0x100, BV at +0x108) go with it; the timestamps at +4 and +12 stay, so the fences of the
+	 * lost work are answered by the first submission after the restart. */
+	((uint32_t *)gpu_bufs[2].va)[0x100 / 4] = 0;
+	((uint32_t *)gpu_bufs[2].va)[0x108 / 4] = 0;
+	clean_dcache64((addr64_t)gpu_bufs[2].pa + 0x100, 16, TRUE);
+	gw(GBIF_HALT, 0);
+	(void)gr(GBIF_HALT);
+	gw(RBBM_GBIF_HALT, 0);
+	(void)gr(RBBM_GBIF_HALT);
+	gw(CP_RB_BASE, (uint32_t)gpu_bufs[0].iova);
+	gw(CP_RB_BASE + 1, 0);
+	gw(CP_RB_CNTL, 0x20c);
+	gw(CP_RB_RPTR_ADDR, (uint32_t)gpu_bufs[2].iova + 0x100);
+	gw(CP_RB_RPTR_ADDR + 1, 0);
+	gw(CP_RB_RPTR_ADDR_BV, (uint32_t)gpu_bufs[2].iova + 0x108);
+	gw(CP_RB_RPTR_ADDR_BV + 1, 0);
+	gw(CP_SQE_INSTR_BASE, (uint32_t)gpu_bufs[1].iova);
+	gw(CP_SQE_INSTR_BASE + 1, 0);
+	gw(CP_SQE_CNTL, 1);
+	delay(2000);
+	/* 3. a8xx_cp_init again: CP_THREAD_CONTROL, then CP_ME_INIT. */
+	ring_wptr = 0;
+	ring_put(pkt7(0x17, 1));
+	ring_put(0x08000000);                           /* concurrent binning off */
+	ring_put(pkt7(0x48, 7));                        /* CP_ME_INIT */
+	ring_put(0x0000014b);                           /* feature mask */
+	ring_put(0x00000003);                           /* multiple hardware contexts */
+	ring_put(0x20000000);                           /* error detection */
+	ring_put(0x00000002);                           /* operation mode */
+	ring_put((uint32_t)gpu_bufs[2].iova + 0x800);   /* power-up list (zeroed) */
+	ring_put(0);
+	ring_put(0x80000000);                           /* triplet list format */
+	ring_kick();
+	const bool ok = ring_idle(1000);
+	printf("PANDORA GPU RESTART: CP_ME_INIT %s, rptr %u rptr bv %u wptr %u rbbm %08x sqe %08x\n",
+	    ok ? "DONE" : "NOT DONE", gr(CP_RB_RPTR), gr(CP_RB_RPTR_BV), ring_wptr, gr(RBBM_STATUS_A8XX),
+	    gr(CP_SQE_STATUS_PIPE));
+	/* 4. Each client's context state went with the old ring: its next submission starts with the
+	 * context entry and CP_RESET_CONTEXT_STATE. The waiters look again at the timestamps. */
+	for (unsigned i = 0; i < GPU_MAX_CLIENTS; i++) {
+		if (gpu_clients[i].used) {
+			gpu_clients[i].reset = true;
+		}
+	}
+	thread_wakeup((event_t)&gpu_fence_chan);
+	return ok;
+}
+
+/*
  * Patch 0189, with pandora_gpu_metal=1: every 5 s for 10 minutes (0190), what each client has done
  * (allocations, imports, mappings, frees, submissions, its last fence), the ring timestamp, and
  * any GPU SMMU context fault (FSR, FAR, FSYNR0 of bank 0; cleared once logged); a line only when
@@ -3670,12 +3740,25 @@ gpu_watch(void)
 			printf("PANDORA GPU WATCH: %u s ring timestamp %u (issued %u) rbbm %08x cp int %08x rptr %u wptr %u; "
 			    "table pages %u of %u\n", (t + 1) * 5, ring, gpu_seqno, gr(RBBM_STATUS_A8XX),
 			    gr(CP_INTERRUPT_STATUS_GLOBAL), gr(CP_RB_RPTR), ring_wptr, gpu_smmu.tnext, gpu_smmu.tpages);
+			if (ring != last_ring) {
+				gpu_stuck_ticks = 0;
+			}
 			last_ring = ring;
-		} else if ((int32_t)(last_issued - ring) > 0 && ring != dumped) {
+		} else if ((int32_t)(last_issued - ring) > 0) {
 			/* 0196: work that was already pending at the last tick, no progress since (bb22's
 			 * dump caught a submission issued just before an idle tick). */
-			gpu_hang_dump(ring);   /* 5 s and more without progress, work pending */
-			dumped = ring;
+			if (ring != dumped) {
+				gpu_hang_dump(ring);   /* 5 s and more without progress, work pending */
+				dumped = ring;
+			}
+			/* 0343: 10 s of that with work pending is a hang: restart the ring instead of letting
+			 * every process that renders wait on a fence that will never be written. */
+			if (++gpu_stuck_ticks >= 2 && gpu_restarts < 3) {
+				gpu_stuck_ticks = 0;
+				(void)gpu_ring_restart(ring);
+				dumped = ~0u;
+				last_ring = ~0u;
+			}
 		}
 		if (fsr && fsr != last_fsr) {
 			printf("PANDORA GPU WATCH: SMMU fault fsr %08x far %08x%08x fsynr0 %08x\n", fsr,
