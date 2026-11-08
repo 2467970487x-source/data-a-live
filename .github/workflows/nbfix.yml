@@ -30,7 +30,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p in
-          gh release download nbfix-src --pattern 'NativeAdrenoMetal*' --dir in --clobber
+          gh release download nbfix-src --dir in --clobber
           ls -l in
 
       - name: Assemble the bundle and build the library
