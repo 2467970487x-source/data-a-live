@@ -44,7 +44,7 @@ jobs:
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           echo "sdk: $SDK"
           clang -arch arm64 -isysroot "$SDK" -mios-version-min=16.0 \
-                -dynamiclib -O2 -fno-objc-arc -Wall \
+                -dynamiclib -O2 -fno-objc-arc -Wall -lobjc \
                 -install_name @loader_path/nbfix.dylib \
                 -o out/nbfix.dylib tools/gpu-driver/nbfix.m
           file out/nbfix.dylib
