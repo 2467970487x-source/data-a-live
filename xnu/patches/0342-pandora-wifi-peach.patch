@@ -2767,7 +2767,7 @@ diff --git a/bsd/dev/qcom/PeachApple80211.c b/bsd/dev/qcom/PeachApple80211.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/qcom/PeachApple80211.c
-@@ -0,0 +1,471 @@
+@@ -0,0 +1,487 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* iOS 16 Apple80211 ioctl/event ABI, as recorded in HackiOS redwood's
 + * redwood_apple80211.c. Only implemented Peach operations/capabilities are
@@ -2980,7 +2980,14 @@ new file mode 100644
 +    }
 +    default: break;
 +    }
-+    if (info.state != PeachNetOnline) return ENXIO;
++    /* Identity queries are also asked in the middle of a switch, while the
++     * state is briefly Ready or Recovering although the link is up: log104
++     * refused 262 of them that way. wifid then holds no record of what the
++     * interface is joined to, and its private-MAC carry-over inserts nil and
++     * aborts (three times per boot, after which iOS stops restarting it and
++     * the Wi-Fi page never opens again). The last selection is still valid
++     * here, so answer from it whatever the state says. */
++    if (info.state != PeachNetOnline && !info.current.ssid_bytes) return ENXIO;
 +    switch (r->type) {
 +    case 1: {
 +        int err = give(r, info.current.ssid, info.current.ssid_bytes);
@@ -3008,12 +3015,21 @@ new file mode 100644
 +         * lands in its private-MAC bookkeeping right after this query, so the
 +         * question "did it get a complete network or an empty one" has to be
 +         * answerable from the log. */
-+        static unsigned dumps;
-+        if (dumps < 4) {
-+            dumps++;
-+            printf("NEZHA WIFI: current network ssid %u/%.*s bssid %02x:%02x:%02x:%02x:%02x:%02x "
-+                "ie %u rssi %d freq %u capability %#x\n",
-+                info.current.ssid_bytes, info.current.ssid_bytes, info.current.ssid,
++        /* One line per change of answer rather than per call: the point is to
++         * see what wifid held at the instant it died, and a record that empties
++         * out mid-session (state went to Ready/Recovering while a selection was
++         * still installed) is exactly the thing this query has to prove. */
++        static unsigned char seen_ssid[32], seen_bssid[6];
++        static unsigned seen_bytes;
++        if (seen_bytes != info.current.ssid_bytes ||
++            memcmp(seen_ssid, info.current.ssid, info.current.ssid_bytes) ||
++            memcmp(seen_bssid, info.current.bssid, 6)) {
++            seen_bytes = info.current.ssid_bytes;
++            memcpy(seen_ssid, info.current.ssid, info.current.ssid_bytes);
++            memcpy(seen_bssid, info.current.bssid, 6);
++            printf("NEZHA WIFI: current network state %u ssid %u/%.*s "
++                "bssid %02x:%02x:%02x:%02x:%02x:%02x ie %u rssi %d freq %u capability %#x\n",
++                info.state, info.current.ssid_bytes, info.current.ssid_bytes, info.current.ssid,
 +                info.current.bssid[0], info.current.bssid[1], info.current.bssid[2],
 +                info.current.bssid[3], info.current.bssid[4], info.current.bssid[5],
 +                info.current.ie_bytes, info.current.rssi, info.current.frequency,
