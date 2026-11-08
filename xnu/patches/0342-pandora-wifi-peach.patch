@@ -2,7 +2,7 @@ diff --git a/bsd/dev/pandora_wifi.c b/bsd/dev/pandora_wifi.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/pandora_wifi.c
-@@ -0,0 +1,1905 @@
+@@ -0,0 +1,1917 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* Nezha/SM8850 Peach: board power, CESTA v3, PCIe0 and isolated firmware DMA.
 + * Register sequences follow Qualcomm's pci-msm.c, crm-v2.c, clk-rpmh.c and
@@ -1466,9 +1466,12 @@ new file mode 100644
 +        if (!err) peach_net_status(&wifi_wmi, wifi_net_state, 0);
 +        return err;
 +    }
-+    if (wifi_request.action == PeachControlJoin)
++    if (wifi_request.action == PeachControlJoin) {
++        /* A selection supersedes the deadline armed by a leave. */
++        wifi_rejoin_at = 0;
 +        printf("NEZHA WIFI: manual join SSID %.*s security %u\n",
 +            wifi_request.join.ssid_bytes, wifi_request.join.ssid, wifi_request.join.security);
++    }
 +    if (wifi_tx.bound) {
 +        /* Preferred: retire the live link in place. Peer delete makes the
 +         * firmware drop its pairwise/group keys with the peer, so the switch
@@ -1504,6 +1507,15 @@ new file mode 100644
 +    if (wifi_request.action == PeachControlLeave) {
 +        wifi_request.action = 0;
 +        wifi_manual_join = 0; /* an idle interface may re-join when it is asked to */
++        /* Arm a deadline instead of waiting for an owner that may never come
++         * back. log101: the operator tapped another network at 97.9 s, the
++         * driver retired the link, wifid aborted before it could send the
++         * join, and the interface then sat idle while wifid polled it 787
++         * times with ENXIO. Twenty seconds is long enough for a real switch
++         * (wifid sends its join within a second of this) and short enough
++         * that the phone is not offline for the rest of the run. */
++        if (!peach_net_radio_off() && wifi_auto_joins < WIFI_AUTO_JOINS)
++            wifi_rejoin_at = wifi_now(NULL) + 20000000ull;
 +        peach_net_status(&wifi_wmi, PeachNetReady, 0);
 +        printf("NEZHA WIFI: manual leave complete; scan ready\n");
 +        goto clear_request;
@@ -1840,12 +1852,12 @@ new file mode 100644
 +         * boot) or its replacement is stuck before it reaches this driver.
 +         * The pack still names a network, so bring the link back rather than
 +         * leaving a working radio idle until the phone is rebooted. */
-+        if (!err && wifi_net_attached && !wifi_tx.bound && wifi_lost_at &&
++        if (!err && wifi_net_attached && !wifi_tx.bound && wifi_lost_at && !peach_net_radio_off() &&
 +            wifi_auto_joins < WIFI_AUTO_JOINS &&
 +            wifi_now(NULL) - wifi_lost_at > 8000000ull &&
 +            wifi_now(NULL) - peach_apple80211_last_us > 8000000ull)
 +            wifi_rejoin_at = wifi_now(NULL);
-+        if (!err && wifi_rejoin_at && wifi_net_attached && !wifi_tx.bound &&
++        if (!err && wifi_rejoin_at && wifi_net_attached && !wifi_tx.bound && !peach_net_radio_off() &&
 +            wifi_now(NULL) >= wifi_rejoin_at) {
 +            wifi_rejoin_at = 0;
 +            wifi_lost_at = 0;
@@ -2729,7 +2741,7 @@ diff --git a/bsd/dev/qcom/PeachApple80211.c b/bsd/dev/qcom/PeachApple80211.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/qcom/PeachApple80211.c
-@@ -0,0 +1,396 @@
+@@ -0,0 +1,444 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* iOS 16 Apple80211 ioctl/event ABI, as recorded in HackiOS redwood's
 + * redwood_apple80211.c. Only implemented Peach operations/capabilities are
@@ -2964,7 +2976,41 @@ new file mode 100644
 +        uint32_t auth[4] = {1, 1, info.security == PeachStationWpa2Psk ? 8u : 0, 0};
 +        return give(r, auth, sizeof(auth));
 +    }
-+    case 103: return network(r, &info.current);
++    case 103: {
++        /* The record wifid reads to decide what the interface is joined to.
++         * Contents, not just success: every abort so far (log100, log101)
++         * lands in its private-MAC bookkeeping right after this query, so the
++         * question "did it get a complete network or an empty one" has to be
++         * answerable from the log. */
++        static unsigned dumps;
++        if (dumps < 4) {
++            dumps++;
++            printf("NEZHA WIFI: current network ssid %u/%.*s bssid %02x:%02x:%02x:%02x:%02x:%02x "
++                "ie %u rssi %d freq %u capability %#x\n",
++                info.current.ssid_bytes, info.current.ssid_bytes, info.current.ssid,
++                info.current.bssid[0], info.current.bssid[1], info.current.bssid[2],
++                info.current.bssid[3], info.current.bssid[4], info.current.bssid[5],
++                info.current.ie_bytes, info.current.rssi, info.current.frequency,
++                info.current.capability);
++        }
++        return network(r, &info.current);
++    }
++    case 115: {
++        /* iOS 16 asks this 1288-byte query in every switch window and aborts
++         * its private-MAC bookkeeping moments later. Dump what the caller
++         * pre-fills before refusing, so the next round can name the structure
++         * from evidence instead of guessing at a layout. */
++        static unsigned previews;
++        if (previews < 3 && r->data && r->length) {
++            uint32_t head[12] = {0};
++            unsigned bytes = r->length < sizeof(head) ? r->length : sizeof(head);
++            previews++;
++            if (!copyin(r->data, head, bytes))
++                printf("NEZHA WIFI: get 115 head %08x %08x %08x %08x %08x %08x %08x %08x\n",
++                    head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7]);
++        }
++        return EOPNOTSUPP;
++    }
 +    default: return EOPNOTSUPP;
 +    }
 +}
@@ -3054,10 +3100,24 @@ new file mode 100644
 +        int err = copyin(r->data, power, sizeof(power));
 +        if (err) return err;
 +        PeachNetInfo info; peach_net_info(&info);
-+        /* Idempotent power-on only. Do not acknowledge power-off or
-+         * restart before hardware teardown/drain has been implemented. */
-+        return power[0] == 1 && power[1] == 1 && power[2] == 1 && info.powered &&
-+            info.state != PeachNetFailed ? 0 : EOPNOTSUPP;
++        if (power[0] != 1 || power[1] != 1 || power[2] > 1) return EOPNOTSUPP;
++        if (!power[2]) {
++            /* The switch in Settings is the operator's own way out of a wedged
++             * interface. log101 shows that tap answered with EOPNOTSUPP and the
++             * switch snapping straight back, leaving no recovery at all once
++             * wifid has aborted three times and launchd stops restarting it.
++             * Accept it: retire the link, keep the radio mapped for the next
++             * stage, and stop re-joining until it is switched on again. */
++            peach_net_radio(0);
++            PeachNetRequest request = { .action = PeachControlLeave };
++            err = peach_net_request(&request);
++            printf("NEZHA WIFI: radio off accepted; leave queued %d\n", err);
++            return err == EBUSY ? 0 : err;
++        }
++        /* Power-on is unconditional: a rejected "on" is what leaves the toggle
++         * stuck off after a failed run. The worker re-joins from the pack. */
++        peach_net_radio(1);
++        return 0;
 +    }
 +    return EOPNOTSUPP;
 +}
@@ -4677,7 +4737,7 @@ diff --git a/bsd/dev/qcom/PeachNet.c b/bsd/dev/qcom/PeachNet.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/qcom/PeachNet.c
-@@ -0,0 +1,423 @@
+@@ -0,0 +1,442 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* BSD Ethernet and control snapshots over the single Peach protocol worker. */
 +#include "PeachNet.h"
@@ -4710,6 +4770,11 @@ new file mode 100644
 +static PeachWmiBss net_bss[PEACH_WMI_BSS_ENTRIES];
 +static PeachWmiScanChannel net_channels[PEACH_WMI_SCAN_CHANNELS];
 +static unsigned net_channel_count, net_join_pending, net_scan_pending, net_leave_pending;
++/* The administrative radio state the operator asked for through the Settings
++ * switch. The radio itself stays loaded and mapped either way - powering the
++ * hardware down is a separate stage - so this only gates what is reported and
++ * whether the worker may put the link back by itself. */
++static unsigned net_radio_off;
 +static PeachNetRequest net_request;
 +static mbuf_t net_queue[TX_QUEUE], net_pending;
 +static unsigned net_head, net_count, net_online;
@@ -4840,7 +4905,7 @@ new file mode 100644
 +        net_join_pending = 0;
 +    }
 +    if (w) {
-+        net_info_data.powered = w->ready != 0;
++        net_info_data.powered = w->ready != 0 && !net_radio_off;
 +        net_channel_count = w->channel_count;
 +        memcpy(net_channels, w->channels, net_channel_count * sizeof(net_channels[0]));
 +        net_info_data.country = w->regulatory[w->radio.phy].alpha2;
@@ -4872,9 +4937,23 @@ new file mode 100644
 +    net_trace[0] = net_trace[1] = 0;
 +    net_seen[0] = net_seen[1] = 0;
 +}
-+void peach_net_info(PeachNetInfo *out)
++void peach_net_radio(int on)
 +{
-+    lck_mtx_lock(&net_lock); *out = net_info_data;
++    lck_mtx_lock(&net_lock);
++    net_radio_off = on ? 0 : 1;
++    /* Report the new administrative state immediately: the next status
++     * snapshot may be seconds away, and a toggle that reads its own old value
++     * back is the toggle that snaps straight back. */
++    net_info_data.powered = on ? 1 : 0;
++    lck_mtx_unlock(&net_lock);
++    printf("NEZHA WIFI: radio %s by the operator\n", on ? "on" : "off");
++}
++unsigned peach_net_radio_off(void)
++{
++    return net_radio_off;
++}
++void peach_net_info(PeachNetInfo *out)
++{    lck_mtx_lock(&net_lock); *out = net_info_data;
 +    out->state = net_snapshot.state; out->error = net_snapshot.error;
 +    lck_mtx_unlock(&net_lock);
 +}
@@ -5105,7 +5184,7 @@ diff --git a/bsd/dev/qcom/PeachNet.h b/bsd/dev/qcom/PeachNet.h
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/qcom/PeachNet.h
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,39 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +#ifndef PEACH_NET_H
 +#define PEACH_NET_H
@@ -5134,6 +5213,10 @@ new file mode 100644
 +int peach_net_attach(const unsigned char mac[6]);
 +void peach_net_link(unsigned up);
 +void peach_net_leave(void);
++/* Administrative radio state from the Settings switch, and whether the worker
++ * is allowed to put the link back on its own. */
++void peach_net_radio(int on);
++unsigned peach_net_radio_off(void);
 +int peach_net_transmit(PeachTx *);
 +void peach_net_receive(const void *, size_t);
 +void peach_net_stop(int error);
