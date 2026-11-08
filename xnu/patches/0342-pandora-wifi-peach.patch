@@ -2,7 +2,7 @@ diff --git a/bsd/dev/pandora_wifi.c b/bsd/dev/pandora_wifi.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/pandora_wifi.c
-@@ -0,0 +1,1884 @@
+@@ -0,0 +1,1905 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* Nezha/SM8850 Peach: board power, CESTA v3, PCIe0 and isolated firmware DMA.
 + * Register sequences follow Qualcomm's pci-msm.c, crm-v2.c, clk-rpmh.c and
@@ -132,6 +132,13 @@ new file mode 100644
 +#define WIFI_AUTO_JOINS 6u
 +static unsigned wifi_auto_joins;
 +static uint64_t wifi_rejoin_at;
++/* When the link was lost after having been up, and the last finished request
++ * from userspace. log99 has wifid abort three times and the phone then sit
++ * offline for the remaining 90 s of the run with the radio perfectly able to
++ * work: the interface had no owner left to ask for the network the pack
++ * already names. If both have been quiet for a while, put the link back. */
++extern uint64_t peach_apple80211_last_us;
++static uint64_t wifi_lost_at;
 +/* Set while a join the operator asked for is the one being attempted. The
 + * re-join above must not fire after such a join fails: log98 has the phone
 + * pointing at "Redmi K60", the driver losing that association, and the worker
@@ -1816,18 +1823,32 @@ new file mode 100644
 +                wifi_net_state = PeachNetOnline;
 +                wifi_auto_joins = 0; /* a working link refills the re-join budget */
 +                wifi_manual_join = 0; /* the selection succeeded; drops may re-join again */
++                wifi_lost_at = 0;
 +                peach_net_status(&wifi_wmi, wifi_net_state, 0);
 +                printf("NEZHA WIFI: association/security complete; en0 link up, IP configuration pending\n");
 +            }
 +            if (!err) err = peach_net_transmit(&wifi_tx);
 +        } else if (!err && wifi_net_attached && wifi_net_state == PeachNetOnline) {
 +            wifi_net_state = PeachNetHandshake;
++            wifi_lost_at = wifi_now(NULL);
 +            peach_net_status(&wifi_wmi, wifi_net_state, 0);
++            printf("NEZHA WIFI: link lost while up; watching for an owner\n");
 +        }
 +        if (err && wifi_net_attached) err = wifi_firmware_recover(err);
++        /* Nobody has asked for anything for 8 s and the link has been down
++         * for as long: wifid died (three aborts stop it for the rest of the
++         * boot) or its replacement is stuck before it reaches this driver.
++         * The pack still names a network, so bring the link back rather than
++         * leaving a working radio idle until the phone is rebooted. */
++        if (!err && wifi_net_attached && !wifi_tx.bound && wifi_lost_at &&
++            wifi_auto_joins < WIFI_AUTO_JOINS &&
++            wifi_now(NULL) - wifi_lost_at > 8000000ull &&
++            wifi_now(NULL) - peach_apple80211_last_us > 8000000ull)
++            wifi_rejoin_at = wifi_now(NULL);
 +        if (!err && wifi_rejoin_at && wifi_net_attached && !wifi_tx.bound &&
 +            wifi_now(NULL) >= wifi_rejoin_at) {
 +            wifi_rejoin_at = 0;
++            wifi_lost_at = 0;
 +            if (wifi_auto_joins < WIFI_AUTO_JOINS) {
 +                printf("NEZHA WIFI: automatic re-join %u/%u after recovery\n",
 +                    ++wifi_auto_joins, WIFI_AUTO_JOINS);
@@ -2708,7 +2729,7 @@ diff --git a/bsd/dev/qcom/PeachApple80211.c b/bsd/dev/qcom/PeachApple80211.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/qcom/PeachApple80211.c
-@@ -0,0 +1,389 @@
+@@ -0,0 +1,396 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* iOS 16 Apple80211 ioctl/event ABI, as recorded in HackiOS redwood's
 + * redwood_apple80211.c. Only implemented Peach operations/capabilities are
@@ -2996,36 +3017,31 @@ new file mode 100644
 +        if (!err && (a->version != 1 || a->ssid_bytes > 32 || a->channel_count > 400 ||
 +            a->name_count > 10 || (a->scan_type != 1 && a->scan_type != 2))) err = EINVAL;
 +        /* Backend performs a full passive scan. It never transmits probes
-+         * or overrides the firmware's board-specific regulatory rules. */
++         * or overrides the firmware's board-specific regulatory rules.
++         * A sweep already in flight is reported as accepted, not EBUSY:
++         * log99 has three refused scans in a row, each followed by wifid
++         * retrying, which is the "the password box takes forever" symptom. */
 +        if (!err) { PeachNetRequest request = { .action = PeachControlScan }; err = peach_net_request(&request); }
++        if (err == EBUSY) err = 0;
 +        kfree_data(a, sizeof(*a)); return err;
 +    }
 +    if (r->type == 383) {
-+        /* iOS 16 hides a second scan entry point behind this set: 4104 bytes
-+         * of which the first eight are {version, body length} and the rest is
-+         * an XML document. log98 proved it is a scan - the BSS entry that
-+         * wifid later joined arrived only after this call - so it is handled
-+         * as one instead of EOPNOTSUPP, which is what was aborting wifid.
-+         * Two refinements over "scan and hope": the body is text, so one
-+         * readable copy says which networks it is asking about, and a scan
-+         * already in flight must be reported as accepted rather than EBUSY,
-+         * because wifid retried an EBUSY five times in twenty seconds and
-+         * each retry was another three-second sweep on the radio. */
-+        char body[201] = {0};
-+        unsigned bytes = r->length > 8 ? r->length - 8 : 0;
-+        if (bytes > 200) bytes = 200;
-+        if (r->data) (void)copyin(r->data + 8, body, bytes);
-+        unsigned text = 0;
-+        while (text < bytes && (unsigned char)body[text] >= 0x20 && (unsigned char)body[text] < 0x7f) text++;
++        /* iOS 16 hides a second entry behind this set: a 4096-byte body plus
++         * an 8-byte header. log98's first dump read the header's worth of
++         * bytes at +8 and found "<?xm" followed by garbage, and log99's
++         * proper dump of the raw payload starts with "<?xml ve" at offset 0,
++         * so the body is the whole buffer and the header is elsewhere.
++         * Printed as text with its first printable run so the document's
++         * subject (which networks, or what property) is finally visible. */
++        char body[241] = {0};
++        unsigned bytes = r->length < 240 ? r->length : 240;
++        if (r->data && bytes) (void)copyin(r->data, body, bytes);
++        for (unsigned i = 0; i < bytes; i++)
++            if ((unsigned char)body[i] < 0x20 && body[i] != '\t') body[i] = ' ';
 +        static unsigned dumps;
 +        if (dumps < 2) {
 +            dumps++;
-+            if (text == bytes && bytes)
-+                printf("NEZHA WIFI: set 383 length %u text %s\n", r->length, body);
-+            else
-+                printf("NEZHA WIFI: set 383 length %u binary %02x%02x%02x%02x text %u\n",
-+                    r->length, (unsigned char)body[0], (unsigned char)body[1],
-+                    (unsigned char)body[2], (unsigned char)body[3], text);
++            printf("NEZHA WIFI: set 383 length %u text %s\n", r->length, body);
 +        }
 +        PeachNetRequest request = { .action = PeachControlScan };
 +        int err = peach_net_request(&request);
@@ -3045,13 +3061,20 @@ new file mode 100644
 +    }
 +    return EOPNOTSUPP;
 +}
-+/* Every request wifid makes arrives here. One line per call, capped so a long
-+ * browsing session cannot flood the 4 MB ring: a userspace abort leaves the
-+ * last line before it as the only evidence of what it was asking for, and the
-+ * deduped "first of each type" scheme used before went silent exactly during
-+ * the switch that crashed wifid. */
++/* Every request wifid makes arrives here. Entry and exit are logged
++ * separately, capped so a long browsing session cannot flood the 4 MB ring.
++ * The two lines are not decoration: after wifid aborted in log99 the next
++ * instances it started produced no log line at all for the rest of the run,
++ * and an exit-only log cannot tell "never arrived" from "arrived and is stuck
++ * inside this driver", which are two completely different bugs. */
 +static unsigned apple_calls;
-+#define APPLE_CALL_LINES 6000u
++#define APPLE_CALL_LINES 12000u
++/* When the last request finished, in the worker's microsecond base. Set on
++ * the way out, not on the way in, so a request that never returns leaves this
++ * stale instead of looking like a busy owner. pandora_wifi's worker uses it to
++ * tell an interface nobody is talking to (wifid has died, Settings is gone)
++ * from one whose owner is merely between requests. */
++uint64_t peach_apple80211_last_us;
 +static int apple_ioctl(u_long command, void *data)
 +{
 +    if (command != APPLE_SET && command != APPLE_GET) return EOPNOTSUPP;
@@ -3065,15 +3088,20 @@ new file mode 100644
 +}
 +int peach_apple80211_ioctl(u_long command, void *data)
 +{
-+    int err = apple_ioctl(command, data);
 +    AppleRequest *r = data;
-+    if (!r || (command != APPLE_SET && command != APPLE_GET)) return err;
-+    if (apple_calls < APPLE_CALL_LINES) {
-+        unsigned n = ++apple_calls;
-+        printf("NEZHA WIFI: a80211 %u %s type %d length %u -> %d\n", n,
-+            command == APPLE_SET ? "set" : "get", r->type, r->length, err);
-+        if (n == APPLE_CALL_LINES) printf("NEZHA WIFI: a80211 log full after %u calls\n", n);
++    unsigned n = 0;
++    if (r && (command == APPLE_SET || command == APPLE_GET)) {
++        if (apple_calls < APPLE_CALL_LINES) n = ++apple_calls;
++        if (n) printf("NEZHA WIFI: a80211 %u in %s type %d length %u\n", n,
++            command == APPLE_SET ? "set" : "get", r->type, r->length);
 +    }
++    int err = apple_ioctl(command, data);
++    if (r && (command == APPLE_SET || command == APPLE_GET)) {
++        uint64_t ns; absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++        peach_apple80211_last_us = ns / 1000;
++    }
++    if (n) printf("NEZHA WIFI: a80211 %u out %d\n", n, err);
++    if (n == APPLE_CALL_LINES) printf("NEZHA WIFI: a80211 log full after %u calls\n", n);
 +    return err;
 +}
 +static void post(unsigned code, const void *data, unsigned bytes)
