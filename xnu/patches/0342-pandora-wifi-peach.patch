@@ -2,7 +2,7 @@ diff --git a/bsd/dev/pandora_wifi.c b/bsd/dev/pandora_wifi.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/pandora_wifi.c
-@@ -0,0 +1,1917 @@
+@@ -0,0 +1,1943 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* Nezha/SM8850 Peach: board power, CESTA v3, PCIe0 and isolated firmware DMA.
 + * Register sequences follow Qualcomm's pci-msm.c, crm-v2.c, clk-rpmh.c and
@@ -80,6 +80,10 @@ new file mode 100644
 +static unsigned wifi_delay = 20;
 +#define WIFI_STAGED 3000
 +static const char *wifi_step = "init";
++/* Print the whole BSS cache after each sweep. The boot-time passive sweep used
++ * to be the only one that listed what it kept, so a later sweep that missed
++ * the very network the operator had tapped left nothing in the log. */
++static void wifi_dump_bss(const char *tag);
 +static uint64_t wifi_arena_pa, wifi_tables_pa;
 +static vm_offset_t wifi_arena, wifi_tables;
 +static ArmSmmu4KIo wifi_smmu_io;
@@ -1389,13 +1393,7 @@ new file mode 100644
 +     * are the only way to tell "the AP was never heard" from "it was heard and
 +     * then dropped by the parser". log88 had 13 BSS and none of them was
 +     * laoshi_5G, with no record of what those 13 were. */
-+    for (unsigned i = 0; i < wifi_wmi.bss_count; i++) {
-+        const PeachWmiBss *b = &wifi_wmi.bss[i];
-+        printf("NEZHA WIFI: BSS %u %02x:%02x:%02x:%02x:%02x:%02x %u MHz RSSI %d cap %#x ie %u%s ssid %.*s\n",
-+            i, b->bssid[0], b->bssid[1], b->bssid[2], b->bssid[3], b->bssid[4], b->bssid[5],
-+            b->frequency, b->rssi, b->capability, b->ie_bytes,
-+            b->ies_truncated ? " truncated" : "", b->ssid_bytes, b->ssid);
-+    }
++    wifi_dump_bss("boot");
 +    return 0;
 +}
 +
@@ -1452,17 +1450,45 @@ new file mode 100644
 +    }
 +    return selected;
 +}
++static void wifi_dump_bss(const char *tag)
++{
++    printf("NEZHA WIFI: %s scan kept %u dropped %u\n",
++        tag, wifi_wmi.bss_count, wifi_wmi.bss_dropped);
++    for (unsigned i = 0; i < wifi_wmi.bss_count; i++) {
++        const PeachWmiBss *b = &wifi_wmi.bss[i];
++        printf("NEZHA WIFI: %s BSS %u %02x:%02x:%02x:%02x:%02x:%02x %u MHz RSSI %d cap %#x ie %u%s ssid %.*s\n",
++            tag, i, b->bssid[0], b->bssid[1], b->bssid[2], b->bssid[3], b->bssid[4], b->bssid[5],
++            b->frequency, b->rssi, b->capability, b->ie_bytes,
++            b->ies_truncated ? " truncated" : "", b->ssid_bytes, b->ssid);
++    }
++}
 +static int wifi_connection_request(void)
 +{
 +    if (!peach_net_take_request(&wifi_request)) return 0;
 +    int err = 0;
 +    if (wifi_request.action == PeachControlScan) {
-+        wifi_step = "requested passive scan";
-+        int err = peach_wmi_passive_scan(&wifi_wmi);
++        /* Active first. A phone hotspot (the Redmi K60 in log103) answers a
++         * probe request immediately, while its beacon can miss a 120 ms
++         * passive dwell entirely: Android hears that hotspot at -38 dBm and
++         * this driver's sweep did not list it at all, so Settings had nothing
++         * to join and wifid never sent a join request. A regulatory domain
++         * that refuses directed probes makes the active sweep fail, and the
++         * passive one is then retried unchanged. */
++        wifi_step = "requested active scan";
++        int err = peach_wmi_active_scan(&wifi_wmi);
++        const char *tag = "active";
++        if (err) {
++            printf("NEZHA WIFI: active scan refused %d (event %#x reason %u), retrying passive\n",
++                err, wifi_wmi.scan_event, wifi_wmi.scan_reason);
++            wifi_step = "requested passive scan";
++            err = peach_wmi_passive_scan(&wifi_wmi);
++            tag = "passive";
++        }
 +        if (err == PeachWmiScanFailed) {
 +            peach_net_status(&wifi_wmi, wifi_net_state, EAGAIN);
 +            return 0;
 +        }
++        wifi_dump_bss(tag);
 +        if (!err) peach_net_status(&wifi_wmi, wifi_net_state, 0);
 +        return err;
 +    }
@@ -2741,7 +2767,7 @@ diff --git a/bsd/dev/qcom/PeachApple80211.c b/bsd/dev/qcom/PeachApple80211.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/qcom/PeachApple80211.c
-@@ -0,0 +1,452 @@
+@@ -0,0 +1,471 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* iOS 16 Apple80211 ioctl/event ABI, as recorded in HackiOS redwood's
 + * redwood_apple80211.c. Only implemented Peach operations/capabilities are
@@ -2996,20 +3022,34 @@ new file mode 100644
 +        return network(r, &info.current);
 +    }
 +    case 115: {
-+        /* iOS 16 asks this 1288-byte query in every switch window and aborts
-+         * its private-MAC bookkeeping moments later. Dump what the caller
-+         * pre-fills before refusing, so the next round can name the structure
-+         * from evidence instead of guessing at a layout. */
-+        static unsigned previews;
-+        if (previews < 3 && r->data && r->length) {
-+            uint32_t head[12] = {0};
-+            unsigned bytes = r->length < sizeof(head) ? r->length : sizeof(head);
-+            previews++;
-+            if (!copyin(r->data, head, bytes))
-+                printf("NEZHA WIFI: get 115 head %08x %08x %08x %08x %08x %08x %08x %08x\n",
-+                    head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7]);
++        /* iOS 16 asks this 1288-byte query in every switch window, and every
++         * wifid abort in log100..log103 landed 6 ms after it: the call used to
++         * answer EOPNOTSUPP and leave the caller's buffer untouched, so wifid
++         * took an all-zero record and raised on the empty SSID while booking
++         * its private MAC. Answer with the live network record instead of an
++         * error, and keep a line of evidence about what was handed over. */
++        static unsigned answered;
++        if (r->length < sizeof(AppleScanResult)) return EOPNOTSUPP;
++        AppleScanResult *out = kalloc_data(sizeof(*out), Z_WAITOK | Z_ZERO);
++        if (!out) return ENOMEM;
++        const PeachWmiBss *b = &info.current;
++        out->version = 1; out->channel = bss_channel(b->frequency);
++        out->rssi = b->rssi; out->beacon_interval = b->beacon_interval;
++        out->capability = b->capability;
++        memcpy(out->bssid, b->bssid, 6);
++        out->ssid_bytes = b->ssid_bytes; memcpy(out->ssid, b->ssid, b->ssid_bytes);
++        out->ie_bytes = b->ie_bytes <= sizeof(out->ies) ? b->ie_bytes : 0;
++        memcpy(out->ies, b->ies, out->ie_bytes);
++        int err = give(r, out, sizeof(*out));
++        if (answered < 4) {
++            answered++;
++            printf("NEZHA WIFI: get 115 answered ssid %u/%.*s bssid %02x:%02x:%02x:%02x:%02x:%02x"
++                " ie %u room %u err %d\n", out->ssid_bytes, out->ssid_bytes, out->ssid,
++                out->bssid[0], out->bssid[1], out->bssid[2], out->bssid[3], out->bssid[4],
++                out->bssid[5], out->ie_bytes, r->length, err);
 +        }
-+        return EOPNOTSUPP;
++        kfree_data(out, sizeof(*out));
++        return err;
 +    }
 +    default: return EOPNOTSUPP;
 +    }
@@ -3071,6 +3111,11 @@ new file mode 100644
 +        int err = copyin(r->data, a, sizeof(*a));
 +        if (!err && (a->version != 1 || a->ssid_bytes > 32 || a->channel_count > 400 ||
 +            a->name_count > 10 || (a->scan_type != 1 && a->scan_type != 2))) err = EINVAL;
++        /* Whether this is a directed sweep matters: iOS taps a network it
++         * remembers even when this sweep cannot hear it, and only a directed
++         * request tells the driver which SSID the operator is looking for. */
++        if (!err) printf("NEZHA WIFI: scan request ssid %u/%.*s channels %u type %u\n",
++            a->ssid_bytes, a->ssid_bytes, a->ssid, a->channel_count, a->scan_type);
 +        /* Backend performs a full passive scan. It never transmits probes
 +         * or overrides the firmware's board-specific regulatory rules.
 +         * A sweep already in flight is reported as accepted, not EBUSY:
@@ -7636,7 +7681,7 @@ diff --git a/bsd/dev/qcom/PeachWmi.c b/bsd/dev/qcom/PeachWmi.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/qcom/PeachWmi.c
-@@ -0,0 +1,1333 @@
+@@ -0,0 +1,1345 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* Minimal single-station WMI initialization. Wire offsets/tags are from
 + * fw-api/fw/{wmi.h,wmi_unified.h,wmi_tlv_defs.h,wmi_services.h,wlan_defs.h}
@@ -8509,7 +8554,7 @@ new file mode 100644
 +    report(w, "WMI vdev TX/RX Ethernet encapsulation submitted", 2, 2);
 +    return 0;
 +}
-+int peach_wmi_passive_scan(PeachWmi *w)
++static int scan_with(PeachWmi *w, int active)
 +{
 +    if (!w || w->phase != 2 || !w->ready || !w->radio.valid || w->radio.phy >= 3 ||
 +        w->scan_active || w->vdev_stop_sent || (w->vdev_start_sent && !w->vdev_up_sent))
@@ -8544,8 +8589,17 @@ new file mode 100644
 +     * before it could show a password field (log95: every tap stalled). */
 +    p32(p + 24, 120); p32(p + 28, 120); /* active/passive dwell in ms */
 +    p32(p + 48, 25); p32(p + 52, 15000);
-+    p32(p + 60, 0x21 | (w->scan_id == 0xa001 ? 0x10 : 0));
-+    /* PASSIVE + FILTER_PROBE_REQ; request channel counters on the first scan. */
++    /* Scan control flags. Bit 0 is WMI_SCAN_FLAG_PASSIVE and bit 4 is the
++     * "filter probe requests" bit this code has always set on the first
++     * sweep. Passive-only listening is why a phone hotspot can be invisible:
++     * log103 lists eight APs and not one of them is the Redmi K60 hotspot
++     * that Android hears at -38 dBm on channel 1, because a hotspot beacon is
++     * often the only thing it sends and a 120 ms dwell can miss it. An active
++     * sweep makes the firmware transmit a probe request on each channel, and
++     * every AP answers that with a probe response immediately. */
++    unsigned scan_flags = active ? 0x20u : 0x21u;
++    if (!active && w->scan_id == 0xa001) scan_flags |= 0x10;
++    p32(p + 60, scan_flags);
 +    p32(p + 68, w->channel_count);
 +    p32(p + 72, 1); /* broadcast BSSID, as in ath12k_wmi_start_scan_init */
 +    p += 172; tlv(p, TAG_U32, w->channel_count * 4); p += 4;
@@ -8573,9 +8627,12 @@ new file mode 100644
 +        w->scan_done = 0; w->bss_count = 0;
 +        return err ? err : PeachWmiScanFailed;
 +    }
-+    report(w, "WMI passive scan actual BSS/dropped", w->bss_count, w->bss_dropped);
++    report(w, active ? "WMI active scan actual BSS/dropped" : "WMI passive scan actual BSS/dropped",
++        w->bss_count, w->bss_dropped);
 +    return 0;
 +}
++int peach_wmi_passive_scan(PeachWmi *w) { return scan_with(w, 0); }
++int peach_wmi_active_scan(PeachWmi *w) { return scan_with(w, 1); }
 +int peach_wmi_passive_scan_target(PeachWmi *w, const unsigned char *ssid, unsigned bytes,
 +                                   const unsigned char *bssid)
 +{
@@ -8586,7 +8643,7 @@ new file mode 100644
 +    w->scan_target_bssid_valid = bssid != NULL;
 +    if (bssid) memcpy(w->scan_target_bssid, bssid, 6);
 +    report(w, "WMI manual passive scan target bytes/BSSID filter", bytes, bssid != NULL);
-+    int err = peach_wmi_passive_scan(w);
++    int err = scan_with(w, 0);
 +    w->scan_target_bytes = w->scan_target_bssid_valid = 0;
 +    return err;
 +}
@@ -8974,7 +9031,7 @@ diff --git a/bsd/dev/qcom/PeachWmi.h b/bsd/dev/qcom/PeachWmi.h
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/qcom/PeachWmi.h
-@@ -0,0 +1,169 @@
+@@ -0,0 +1,173 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +#ifndef PEACH_WMI_H
 +#define PEACH_WMI_H
@@ -9097,6 +9154,10 @@ new file mode 100644
 + * failure event; a new scan is allowed. Timeout or transport failure still
 + * requires containment because the firmware may retain the old request. */
 +int peach_wmi_passive_scan(PeachWmi *);
++/* Same sweep with WMI_SCAN_FLAG_PASSIVE cleared: the firmware transmits a
++ * probe request on every channel and APs answer with probe responses. A phone
++ * hotspot whose beacon lands between dwells is only reachable this way. */
++int peach_wmi_active_scan(PeachWmi *);
 +/* One manual selection only; filters received BSS records on the host.
 + * It sends no directed probe and clears the filter before returning. */
 +int peach_wmi_passive_scan_target(PeachWmi *, const unsigned char *ssid, unsigned bytes,
