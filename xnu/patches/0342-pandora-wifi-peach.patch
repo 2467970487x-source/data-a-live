@@ -2741,7 +2741,7 @@ diff --git a/bsd/dev/qcom/PeachApple80211.c b/bsd/dev/qcom/PeachApple80211.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/qcom/PeachApple80211.c
-@@ -0,0 +1,443 @@
+@@ -0,0 +1,452 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* iOS 16 Apple80211 ioctl/event ABI, as recorded in HackiOS redwood's
 + * redwood_apple80211.c. Only implemented Peach operations/capabilities are
@@ -3020,6 +3020,15 @@ new file mode 100644
 +    AppleJoin a; PeachNetRequest request = {0};
 +    int err = copyin(r->data, &a, sizeof(a));
 +    if (err) { erase(&a, sizeof(a)); return err; }
++    /* Every tap in Settings ends up here, and until now a rejected request left
++     * no trace at all: log101 and log102 contain no join line whatsoever, so
++     * "iOS never asked" and "iOS asked with parameters we refuse" looked
++     * identical from the driver side. Log the request before judging it. */
++    printf("NEZHA WIFI: join request %.*s bytes %u auth %u/%u cipher %u key %u "
++        "bssid %02x:%02x:%02x:%02x:%02x:%02x\n",
++        a.ssid_bytes, a.ssid, a.ssid_bytes, a.auth_lower, a.auth_upper,
++        a.key_cipher, a.key_bytes, a.bssid[0], a.bssid[1], a.bssid[2],
++        a.bssid[3], a.bssid[4], a.bssid[5]);
 +    if (a.version != 1 || (a.auth_lower & ~1u) || (a.auth_upper & ~8u) ||
 +        !a.ssid_bytes || a.ssid_bytes > 32) { err = EOPNOTSUPP; goto done; }
 +    request.action = PeachControlJoin; request.join.version = PEACH_CONTROL_VERSION;
@@ -7627,7 +7636,7 @@ diff --git a/bsd/dev/qcom/PeachWmi.c b/bsd/dev/qcom/PeachWmi.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/qcom/PeachWmi.c
-@@ -0,0 +1,1319 @@
+@@ -0,0 +1,1333 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* Minimal single-station WMI initialization. Wire offsets/tags are from
 + * fw-api/fw/{wmi.h,wmi_unified.h,wmi_tlv_defs.h,wmi_services.h,wlan_defs.h}
@@ -7983,7 +7992,21 @@ new file mode 100644
 +        if (frame[pos] == 5 && size >= 4) dtim_period = frame[pos + 3];
 +        pos += 2 + size;
 +    }
-+    if (!ssid) return;
++    /* A beacon whose SSID element has length 0 is either a hidden AP or one of
++     * the "non-transmitted" profiles of an 802.11ax Multiple BSSID set: its
++     * BSSID is a locally-administered twin of the real one (log102: 8c:de ->
++     * 92:de, 54:2b -> 56:2b, 3c:6a -> 5a:6a, c8:bf -> ce:bf) and its SSID
++     * element is empty. Published to iOS as separate networks they become
++     * per-SSID records with no name at all, and wifid aborts while building
++     * one: its private-MAC bookkeeping takes characterAtIndex: on the empty
++     * string, which raises "index out of bounds" on managerQueue (log100,
++     * log101, log102 all abort there). The transmitting BSSID already carries
++     * the same network with a real SSID, so keep that and never hand iOS an
++     * unnamed entry. */
++    if (!ssid || !ssid_bytes) {
++        if (ssid) w->bss_dropped++;
++        return;
++    }
 +    if (w->scan_target_bytes && (ssid_bytes != w->scan_target_bytes ||
 +        memcmp(ssid, w->scan_target_ssid, ssid_bytes) ||
 +        (w->scan_target_bssid_valid && memcmp(frame + 16, w->scan_target_bssid, 6)))) return;
