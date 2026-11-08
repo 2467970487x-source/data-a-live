@@ -1,0 +1,193 @@
+diff --git a/bsd/dev/pandora_gpu.c b/bsd/dev/pandora_gpu.c
+--- a/bsd/dev/pandora_gpu.c
++++ b/bsd/dev/pandora_gpu.c
+@@ -1552,25 +1552,15 @@
+ 	return rptr == ring_wptr && !(st & ~1u);
+ }
+ 
+-static bool
+-gpu_level10(void)
++/*
++ * 0344: the CP half of the bring-up, split out so a restart after a hang runs exactly what the
++ * first start ran: the APIV pipe setup (a hung CP can leave the pipes locked), the secure windows,
++ * the ring and the SQE instruction base. Returns what the BR pipe reads back; 0 means the pipe did
++ * not answer and the CP will not consume anything.
++ */
++static uint32_t
++gpu_cp_regs(void)
+ {
+-	bool ok;
+-	gpu_regs = ml_io_map(GPU_PA, 0x40000);
+-	if (!gpu_regs) {
+-		printf("PANDORA GPU: GPU registers not mapped\n");
+-		return false;
+-	}
+-	/* a6xx_gmu_set_oob(GMU_OOB_GPU_SET), held for the whole level */
+-	gmu_wr(GMU_HOST2GMU_INTR_SET, 1u << 30);
+-	(void)gpu_poll(gpu_gmu, GMU_REG(GMU_GMU2HOST_INTR_INFO), 1u << 31, 1u << 31, 100000, &ok);
+-	gmu_wr(GMU_GMU2HOST_INTR_CLR, 1u << 31);
+-	printf("PANDORA GPU: OOB GPU_SET %s, pwr_clk_status %08x\n", ok ? "acked" : "NOT ACKED", gmu_rd(GMU_PWR_CLK_STATUS));
+-	if (!ok || (gmu_rd(GMU_PWR_CLK_STATUS) & 3)) {
+-		return false;
+-	}
+-
+-	gpu_step("CP: hw_init registers, SQE start");
+ 	gw(CP_APERTURE_CNTL_HOST, 0);
+ 	gw(GBIF_HALT, 0);
+ 	(void)gr(GBIF_HALT);
+@@ -1580,14 +1570,14 @@
+ 	gw(RBBM_SECVID_TSB_TRUSTED_BASE, 0);
+ 	gw(RBBM_SECVID_TSB_TRUSTED_BASE + 1, 0);
+ 	gw(RBBM_SECVID_TSB_TRUSTED_SIZE, 0);
+-	/* Pipes BR 1, BV 2, AQE0 4, AQE1 5, DDE_BR 6, DDE_BV 7 (LPAC 3 skipped); BR adds CDREAD/CDWRITE. */
++	/* Pipes BR 1, BV 2, AQE0 4, AQE1 5, DDE_BR 6, DDE_BV 7; BR adds CDREAD/CDWRITE. */
+ 	static const uint32_t pipes[] = { 1, 2, 4, 5, 6, 7 };
+ 	for (unsigned i = 0; i < sizeof(pipes) / sizeof(pipes[0]); i++) {
+ 		gw(CP_APERTURE_CNTL_HOST, pipes[i] << 12);
+ 		gw(CP_APRIV_CNTL_PIPE, pipes[i] == 1 ? 0x6f : 0x0f);
+ 	}
+ 	gw(CP_APERTURE_CNTL_HOST, 1u << 12);
+-	uint32_t apriv_br = gr(CP_APRIV_CNTL_PIPE);
++	const uint32_t apriv = gr(CP_APRIV_CNTL_PIPE);
+ 	gw(CP_APERTURE_CNTL_HOST, 0);
+ 	gw(CP_SQE_INSTR_BASE, (uint32_t)gpu_bufs[1].iova);
+ 	gw(CP_SQE_INSTR_BASE + 1, 0);
+@@ -1598,6 +1588,29 @@
+ 	gw(CP_RB_RPTR_ADDR + 1, 0);
+ 	gw(CP_RB_RPTR_ADDR_BV, (uint32_t)gpu_bufs[2].iova + 0x108);
+ 	gw(CP_RB_RPTR_ADDR_BV + 1, 0);
++	return apriv;
++}
++
++static bool
++gpu_level10(void)
++{
++	bool ok;
++	gpu_regs = ml_io_map(GPU_PA, 0x40000);
++	if (!gpu_regs) {
++		printf("PANDORA GPU: GPU registers not mapped\n");
++		return false;
++	}
++	/* a6xx_gmu_set_oob(GMU_OOB_GPU_SET), held for the whole level */
++	gmu_wr(GMU_HOST2GMU_INTR_SET, 1u << 30);
++	(void)gpu_poll(gpu_gmu, GMU_REG(GMU_GMU2HOST_INTR_INFO), 1u << 31, 1u << 31, 100000, &ok);
++	gmu_wr(GMU_GMU2HOST_INTR_CLR, 1u << 31);
++	printf("PANDORA GPU: OOB GPU_SET %s, pwr_clk_status %08x\n", ok ? "acked" : "NOT ACKED", gmu_rd(GMU_PWR_CLK_STATUS));
++	if (!ok || (gmu_rd(GMU_PWR_CLK_STATUS) & 3)) {
++		return false;
++	}
++
++	gpu_step("CP: hw_init registers, SQE start");
++	const uint32_t apriv_br = gpu_cp_regs();
+ 	printf("PANDORA GPU: CP regs: gbif halt %08x/%08x apriv br %08x sqe base %08x rb base %08x cntl %08x "
+ 	    "rptr addr %08x/%08x\n", gr(GBIF_HALT), gr(RBBM_GBIF_HALT), apriv_br, gr(CP_SQE_INSTR_BASE),
+ 	    gr(CP_RB_BASE), gr(CP_RB_CNTL), gr(CP_RB_RPTR_ADDR), gr(CP_RB_RPTR_ADDR_BV));
+@@ -2364,6 +2377,7 @@
+ 	}
+ }
+ static bool gpu_ready;
++static bool gpu_dead;              /* 0344: the restart did not bring the CP back; submissions fail fast */
+ static uint32_t gpu_stuck_ticks;   /* 0343: watch ticks in a row with no ring timestamp, work pending */
+ static uint32_t gpu_restarts;      /* 0343: ring restarts after a hang, at most 3 a boot */
+ static uint32_t gpu_bo_gen;
+@@ -3010,6 +3024,11 @@
+ 			}
+ 		}
+ 	}
++	/* 0344: the CP is down for this boot (a restart did not bring it back): fail at once instead of
++	 * making every client wait a second for ring room that will never come. */
++	if (!err && gpu_dead) {
++		err = ENXIO;
++	}
+ 	/* Room in the ring for the frame (at most ~110 dwords) and the IB packets. */
+ 	const uint32_t size = (uint32_t)(gpu_bufs[0].bytes / 4), need = 128 + 4 * n;
+ 	for (unsigned t = 0; !err; t++) {
+@@ -3386,10 +3405,13 @@
+ static void
+ gpu_hang_ib(const char *tag, uint64_t base, uint32_t init, uint32_t rem)
+ {
+-	if (!base || rem > init) {
+-		return;
++	if (!base || !init || rem > init) {
++		return;   /* 0344: an IB of length 0 has nothing to show, and a map of 0 bytes panics the kernel */
+ 	}
+ 	const uint32_t at = init - rem, from = at > 40 ? at - 40 : 0, to = MIN(init, at + 8);
++	if (to <= from) {
++		return;
++	}
+ 	for (unsigned j = 0; j < GPU_MAX_BOS; j++) {
+ 		const struct gpu_bo *b = &gpu_bos[j];
+ 		if (!b->used || !b->iova || b->pages || base < b->iova || base + (uint64_t)to * 4 > b->iova + b->bytes) {
+@@ -3462,7 +3484,11 @@
+ static uint32_t
+ gpu_hang_walk(const char *name, uint64_t base, uint32_t init, uint64_t cp_ib2, bool quiet)
+ {
+-	const struct gpu_bo *b = base && init ? gpu_bo_at(base, (uint64_t)init * 4) : NULL;
++	const struct gpu_bo *b;
++	if (!init) {
++		return 0;   /* 0344: the CP is not in an IB; nothing to walk */
++	}
++	b = base ? gpu_bo_at(base, (uint64_t)init * 4) : NULL;
+ 	if (!b || b->pages || init > (1u << 20)) {
+ 		printf("PANDORA GPU HANG: %s IB1 walk: %llx+%u is in no pool buffer\n", name, (unsigned long long)base, init);
+ 		return 1;
+@@ -3651,19 +3677,11 @@
+ 	((uint32_t *)gpu_bufs[2].va)[0x100 / 4] = 0;
+ 	((uint32_t *)gpu_bufs[2].va)[0x108 / 4] = 0;
+ 	clean_dcache64((addr64_t)gpu_bufs[2].pa + 0x100, 16, TRUE);
+-	gw(GBIF_HALT, 0);
+-	(void)gr(GBIF_HALT);
+-	gw(RBBM_GBIF_HALT, 0);
+-	(void)gr(RBBM_GBIF_HALT);
+-	gw(CP_RB_BASE, (uint32_t)gpu_bufs[0].iova);
+-	gw(CP_RB_BASE + 1, 0);
+-	gw(CP_RB_CNTL, 0x20c);
+-	gw(CP_RB_RPTR_ADDR, (uint32_t)gpu_bufs[2].iova + 0x100);
+-	gw(CP_RB_RPTR_ADDR + 1, 0);
+-	gw(CP_RB_RPTR_ADDR_BV, (uint32_t)gpu_bufs[2].iova + 0x108);
+-	gw(CP_RB_RPTR_ADDR_BV + 1, 0);
+-	gw(CP_SQE_INSTR_BASE, (uint32_t)gpu_bufs[1].iova);
+-	gw(CP_SQE_INSTR_BASE + 1, 0);
++	/* 0344: the pipes as the bring-up set them. A hung CP can leave the APIV pipes locked, and then the
++	 * SQE starts (status deafbead, as on a healthy start) but never reads the ring: rptr stays 0. */
++	const uint32_t apriv = gpu_cp_regs();
++	printf("PANDORA GPU RESTART: CP regs again: apriv br %08x sqe base %08x rb base %08x cntl %08x\n",
++	    apriv, gr(CP_SQE_INSTR_BASE), gr(CP_RB_BASE), gr(CP_RB_CNTL));
+ 	gw(CP_SQE_CNTL, 1);
+ 	delay(2000);
+ 	/* 3. a8xx_cp_init again: CP_THREAD_CONTROL, then CP_ME_INIT. */
+@@ -3691,6 +3709,13 @@
+ 		}
+ 	}
+ 	thread_wakeup((event_t)&gpu_fence_chan);
++	if (!ok) {
++		/* 0344: the CP is past recovery for this boot. Say so once and stop dumping: the registers are
++		 * all zero after the failed restart, and a walk over an IB of length 0 asked the pool for a map of
++		 * 0 bytes (kmem: invalid size 0, vm_kern.c:151), which panicked the kernel 11 s after the hang. */
++		gpu_dead = true;
++		printf("PANDORA GPU RESTART: the CP did not come back; the GPU is out for this boot\n");
++	}
+ 	return ok;
+ }
+ 
+@@ -3747,16 +3772,16 @@
+ 		} else if ((int32_t)(last_issued - ring) > 0) {
+ 			/* 0196: work that was already pending at the last tick, no progress since (bb22's
+ 			 * dump caught a submission issued just before an idle tick). */
+-			if (ring != dumped) {
++			if (!gpu_dead && ring != dumped) {
+ 				gpu_hang_dump(ring);   /* 5 s and more without progress, work pending */
+ 				dumped = ring;
+ 			}
+ 			/* 0343: 10 s of that with work pending is a hang: restart the ring instead of letting
+ 			 * every process that renders wait on a fence that will never be written. */
+-			if (++gpu_stuck_ticks >= 2 && gpu_restarts < 3) {
++			if (!gpu_dead && ++gpu_stuck_ticks >= 2 && gpu_restarts < 3) {
+ 				gpu_stuck_ticks = 0;
+-				(void)gpu_ring_restart(ring);
+-				dumped = ~0u;
++				const bool back = gpu_ring_restart(ring);   /* 0344: sets gpu_dead when the CP stays down */
++				dumped = back ? ~0u : ring;                /* a dead CP is not dumped over again */
+ 				last_ring = ~0u;
+ 			}
+ 		}
