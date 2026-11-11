@@ -1,0 +1,85 @@
+--- a/bsd/dev/pandora_gpu.c
++++ b/bsd/dev/pandora_gpu.c
+@@ -2983,6 +2983,74 @@
+ 	lck_mtx_unlock(&gpu_lock);
+ }
+ 
++/*
++ * 0345: the CP's own registers written from a client IB. 0133's hang dump caught the CP stopped in the
++ * middle of exactly that: a CP_THREAD_CONTROL (0x810b) write of 0 and a 0xdc block writing 0x8104,
++ * 0x8105, 0x8106, 0x8107, 0x8108, 0x810f, 0x8101 and 0x8110 all to 0, CP_ME_CNTL and CP_SQE_CNTL
++ * included, which stops the CP fetching the ring for good: rptr frozen, no hw fault, no interrupt,
++ * sqe 1. The stream is not ours (we write CP_THREAD_CONTROL as a type-3 0x17 packet) and it is not in
++ * NativeAdrenoMetal's data, so a client builds it at run time. Logged only: the next log says which
++ * fence carries it and whether it comes once per context or on every submission.
++ */
++#define GPU_SCAN_DW   4096u   /* the head of each IB that is looked at */
++#define GPU_SCAN_IBS  8u      /* and the first this many IBs of a submission */
++#define GPU_SCAN_LINES 40u    /* printed in a boot, then only counted */
++static uint32_t gpu_scan_prints, gpu_scan_hits, gpu_scan_submits;
++static void
++gpu_scan_cp_regs(int client, uint32_t fence, const uint64_t *ib, const uint32_t *dw, unsigned n)
++{
++	if (gpu_scan_submits >= 200) {
++		return;   /* the first submissions of a boot carry a client's init */
++	}
++	gpu_scan_submits++;
++	for (unsigned k = 0; k < n && k < GPU_SCAN_IBS; k++) {
++		const uint32_t dwords = MIN(dw[k], GPU_SCAN_DW);
++		const struct gpu_bo *b = gpu_bo_at(ib[k], (uint64_t)dwords * 4);
++		if (!b || b->pages || !dwords) {
++			continue;   /* an import: its pages are the client's, not read from here */
++		}
++		const uint64_t off = b->off + (ib[k] - b->iova), len = (uint64_t)dwords * 4;
++		gpu_pool_sync(off, len, true);
++		const vm_offset_t va = gpu_pool_map(off, len);
++		if (!va) {
++			continue;
++		}
++		const volatile uint32_t *p = (const volatile uint32_t *)va;
++		for (uint32_t i = 0; i < dwords; ) {
++			const uint32_t h = p[i], type = h >> 28, op = (h >> 16) & 0x7f;
++			const uint32_t cnt = type == 7 ? (h & 0x3fff) : type == 4 ? (h & 0x7f) : UINT32_MAX;
++			if (cnt == UINT32_MAX || i + 1 + cnt > dwords) {
++				break;
++			}
++			uint32_t reg = 0, val = 0;
++			bool hit = false;
++			if (type == 4 && cnt == 1) {
++				reg = (h >> 8) & 0x3ffff;
++				val = p[i + 1];
++				hit = reg >= 0x8100 && reg <= 0x811f;
++			} else if (type == 7 && op == 0xdc) {
++				for (uint32_t g = 0; g + 1 < cnt && !hit; g += 2) {
++					reg = p[i + 1 + g] & 0x3ffff;
++					val = p[i + 2 + g];
++					hit = reg >= 0x8100 && reg <= 0x811f;
++				}
++			}
++			if (hit) {
++				gpu_scan_hits++;
++				if (gpu_scan_prints < GPU_SCAN_LINES) {
++					gpu_scan_prints++;
++					printf("PANDORA GPU SCAN: client %d (%s) fence %u IB %u of %u +%u: CP reg %03x = %08x "
++					    "(%s); %u such writes in %u submissions\n", client, gpu_clients[client].name,
++					    fence, k, n, i, reg, val, type == 4 ? "type 4" : "0xdc block",
++					    gpu_scan_hits, gpu_scan_submits);
++				}
++			}
++			i += 1 + cnt;
++		}
++		gpu_pool_unmap(va, off, len);
++	}
++}
++
+ int pandora_gpu_submit(int client, const uint64_t *iova, const uint64_t *bytes, unsigned n, uint64_t *fence);
+ int
+ pandora_gpu_submit(int client, const uint64_t *iova, const uint64_t *bytes, unsigned n, uint64_t *fence)
+@@ -3060,6 +3128,7 @@
+ 	}
+ 	if (!err) {
+ 		gpu_reuse_check(client, ib, dw, n);   /* 0326 */
++		gpu_scan_cp_regs(client, gpu_seqno + 1, ib, dw, n);   /* 0345 */
+ 		uint32_t thread = first == 0x70970001u ? 3 : 1;
+ 		/* 0328: a change of submitting client is a context switch: as a6xx_set_pagetable() does whenever the
+ 		 * context differs from the ring's last one, the submission starts with the context entry (BR/BV
