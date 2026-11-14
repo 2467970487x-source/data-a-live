@@ -1,0 +1,8 @@
+NativeAdrenoMetal 755 /System/Library/Extensions/NativeAdrenoMetal.bundle/NativeAdrenoMetal
+NativeAdrenoMetal.Info.plist 644 /System/Library/Extensions/NativeAdrenoMetal.bundle/Info.plist
+NativeAdrenoMetal.clients 644 /System/Library/Extensions/NativeAdrenoMetal.bundle/NativeAdrenoMetal.clients
+NativeAdrenoMetal.clients 644 /System/Library/Extensions/NativeAdrenoMetal.clients
+libvulkan_freedreno.dylib 755 /usr/lib/libvulkan_freedreno.dylib
+vktest 755 /usr/libexec/vktest
+com.apple.backboardd.plist 600 /private/var/mobile/Library/Preferences/com.apple.backboardd.plist
+nbfix.dylib 755 /System/Library/Extensions/NativeAdrenoMetal.bundle/nbfix.dylib
