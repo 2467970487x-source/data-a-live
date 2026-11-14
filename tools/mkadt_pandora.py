@@ -175,7 +175,7 @@ def empty_nvram_proxy():
             ('nvram-current-bank', u32(0)), ('nvram-proxy-data', bytes(image))]
 
 
-def build(seed=None, qemu=False, qemu_gic=False, root_props=(), gpu_pool=0, amp=False):
+def build(seed=None, qemu=False, qemu_gic=False, root_props=(), gpu_pool=0, amp=False, wifi_mac=None):
     """qemu=True: QEMU virt twin (GIC, CNTFRQ, RAM, framebuffer). qemu_gic=True: only GIC/CNTFRQ."""
     phys_base, mem_size = (QEMU_PHYS_BASE, QEMU_MEM_SIZE) if qemu else (PHYS_BASE, MEM_SIZE)
     fb, fb_size, fb_w, fb_h, fb_stride = ((QEMU_FB, QEMU_FB_SIZE, QEMU_FB_W, QEMU_FB_H, QEMU_FB_STRIDE)
@@ -199,6 +199,19 @@ def build(seed=None, qemu=False, qemu_gic=False, root_props=(), gpu_pool=0, amp=
         ph(),
         ('dram-base', u64(phys_base)),
         ('dram-size', u64(mem_size)),
+        # Wi-Fi station address. pandora_wifi.c reads /chosen/nezha-wifi-mac and requires
+        # exactly 6 bytes, then hands them to WLFW WLAN_ENABLE; without the property stage 9
+        # (WLFW WLAN_CFG/MISSION) returns EINVAL before any interface exists, which is what
+        # an unusable Wi-Fi switch looks like. Value comes from the phone's own wlan0.
+        *([('nezha-wifi-mac', wifi_mac)] if wifi_mac else []),
+        # Same address under the name the firmware's own device trees use.
+        # MobileGestalt's "WifiAddressData" answer is what wifid copies into
+        # every network record it tracks; when it comes back nil, wifid's
+        # will-associate callback carries a nil private MAC over an SSID change
+        # and aborts (every switch from the K60 hotspot back to laoshi in
+        # log104 killed it three times, after which iOS stops restarting it and
+        # the Wi-Fi page never opens again). Cheap to carry both names.
+        *([('wifi-mac', wifi_mac)] if wifi_mac else []),
         ('random-seed', seed),
         ('debug-enabled', u32(1)),
         ('embedded-panic-log-size', u32(PANIC_LOG_SIZE)),
@@ -391,6 +404,20 @@ def build(seed=None, qemu=False, qemu_gic=False, root_props=(), gpu_pool=0, amp=
     # dram-size we expose, so XNU maps it but never allocates into it.
     pram = node('pram', [ph(), ('reg', u64(panic_base) + u64(PANIC_LOG_SIZE))])
 
+    # launchd's job for wifid carries _LimitLoadToDeviceTree = ['wlan', 'marconi-wifi']
+    # (read from the phone's own com.apple.wifid.plist): without a device-tree node of
+    # one of those names the job is never loaded, so wifid never starts, no Apple80211
+    # request is ever made and the Settings switch has nothing behind it (log91 has no
+    # exec wifid at all, while the kernel side published its nodes at 0.36 s). This node
+    # is the door only: the interface itself is published by iokit/Kernel/arm/PeachWLAN.cpp,
+    # so it carries no IOClass/IOName and no driver can attach to it.
+    wlan = node('wlan', [
+        ph(),
+        ('name', cstr('wlan')),
+        ('compatible', cstr('apple,wlan-pandora') + cstr('apple,wlan')),
+        ('built-in', u32(1)),
+    ])
+
     # Identity of the iPhone X whose userland runs here: compatible[0] is
     # hw.model/hw.target (D22AP), model is hw.machine/hw.product
     # (iPhone10,3). 'xiaomi,pandora' is what SweetPlatformExpert matches (patch 0110).
@@ -403,7 +430,8 @@ def build(seed=None, qemu=False, qemu_gic=False, root_props=(), gpu_pool=0, amp=
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, options, defaults, cpus, arm_io, fbcon, buttons, pram] + product + ([] if qemu else [ufs]))
+    ], [chosen, options, defaults, cpus, arm_io, fbcon, buttons, pram] + product +
+        ([] if qemu else [wlan, ufs]))
 
 
 if __name__ == '__main__':
@@ -428,8 +456,17 @@ if __name__ == '__main__':
     pool = int(opt('--gpu-pool'), 0) << 20 if opt('--gpu-pool') else 0
     if pool:
         print(f'gpu pool: {pool >> 20} MiB', file=sys.stderr)
+    mac = opt('--wifi-mac')
+    wifi_mac = None
+    if mac:
+        digits = mac.replace(':', '').replace('-', '')
+        assert len(digits) == 12 and all(c in '0123456789abcdefABCDEF' for c in digits), \
+            f'--wifi-mac wants 12 hex digits, got {mac!r}'
+        assert int(digits[:2], 16) & 1 == 0, '--wifi-mac must be a unicast address'
+        wifi_mac = bytes.fromhex(digits)
+        print('wifi mac: ' + ':'.join(digits[i:i + 2] for i in range(0, 12, 2)), file=sys.stderr)
     root = build(qemu='--qemu' in sys.argv, qemu_gic='--qemu-gic' in sys.argv, root_props=props, gpu_pool=pool,
-                 amp='--amp' in sys.argv)
+                 amp='--amp' in sys.argv, wifi_mac=wifi_mac)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:
