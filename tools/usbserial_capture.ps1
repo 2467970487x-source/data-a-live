@@ -30,13 +30,24 @@ try {
 	while ((Get-Date) -lt $deadline) {
 		$name = Find-Port
 		if (-not $name) { Start-Sleep -Milliseconds 500; continue }
-		$port = New-Object System.IO.Ports.SerialPort $name, 115200
-		$port.ReadTimeout = 150
-		$port.DtrEnable = $true
-		$port.RtsEnable = $true
+		# usbser answers "device does not function" for the first second after enumeration and that failed
+		# open wedges the device until it re-enumerates, so give it time to settle before touching it.
+		Start-Sleep -Milliseconds 2000
+		# A failed SerialPort.Open() can leave the COM handle claimed until the object is disposed, which made
+		# every later attempt fail with "access denied" (the device is still coming up a second after it
+		# enumerates). Use a fresh object per attempt and dispose it when the open fails.
 		$opened = $false
-		for ($try = 0; $try -lt 6 -and -not $opened; $try++) {
-			try { Start-Sleep -Milliseconds 500; $port.Open(); $opened = $true } catch { Note "open $name failed: $($_.Exception.Message)" }
+		for ($try = 0; $try -lt 20 -and -not $opened; $try++) {
+			$port = New-Object System.IO.Ports.SerialPort $name, 115200
+			$port.ReadTimeout = 150
+			$port.DtrEnable = $true
+			$port.RtsEnable = $true
+			try { $port.Open(); $opened = $true } catch {
+				Note "open $name failed (try $try): $($_.Exception.Message)"
+				try { $port.Dispose() } catch { }
+				$port = $null
+				Start-Sleep -Milliseconds 400
+			}
 		}
 		if (-not $opened) { continue }
 		Note "opened $name"

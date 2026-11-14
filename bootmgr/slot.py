@@ -17,7 +17,23 @@ import json
 import struct
 import sys
 
-DROP = ('pandora_reboot_after', 'pandora_fbdump')
+# Test-only words that must not reach an everyday boot. Matched by prefix, so pandora_fbdump
+# also takes pandora_fbdump_swap and pandora_stacks takes pandora_stacks_at/_every with it.
+# Keep this in step with what tools/boot_ios.sh adds for diagnostics: a thread-stack snapshot
+# every 30 s is pure overhead on a boot that is meant to be used, not measured.
+DROP = (
+    'pandora_reboot_after',
+    'pandora_fbdump',
+    'pandora_stacks',
+    'pandora_selftest',
+    'pandora_autoswipe',
+)  # fmt: skip
+
+
+def dropped(word):
+    """True for a boot-arg the payload should keep out of the slot."""
+    key = word.split('=', 1)[0]
+    return any(key == d or key.startswith(d + '_') for d in DROP)
 BOOT_LINE_LENGTH = 608
 PAGE = 4096
 # ADT /chosen property per pinned file, in the order of the hashes in the header
@@ -98,7 +114,7 @@ def main():
     c = pl + 72
     words = img[c:c + BOOT_LINE_LENGTH].split(b'\0')[0].decode().split()
     if not keep:
-        words = [w for w in words if w.split('=')[0] not in DROP]
+        words = [w for w in words if not dropped(w)]
     new = ' '.join(words).encode()
     assert len(new) < BOOT_LINE_LENGTH
     img[c:c + BOOT_LINE_LENGTH] = new + b'\0' * (BOOT_LINE_LENGTH - len(new))

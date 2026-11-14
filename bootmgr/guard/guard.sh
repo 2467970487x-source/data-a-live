@@ -15,6 +15,7 @@
 # POSIX sh: runs under Android's mksh, and under dash/bash for the PC test.
 
 MOD=${0%/*}
+[ "$MOD" = "$0" ] && MOD=.     # invoked as "sh guard.sh": there is no slash to cut off
 DEV=
 DIR=/data/local/tmp
 P=$MOD/pinfile
